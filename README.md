@@ -38,6 +38,7 @@ of task create "Name" [options]
   --tag <tags...>                   # Add tags
   --due <YYYY-MM-DD>                # Set due date
   --defer <YYYY-MM-DD>              # Set defer date
+  --planned <YYYY-MM-DD>            # Set planned date
   --flagged                         # Flag the task
   --estimate <minutes>              # Time estimate
   --note <text>                     # Add note
@@ -201,6 +202,7 @@ of task list --flagged | jq '.[] | {name, due}'  # Specific fields
   "tags": ["tag1", "tag2"],
   "due": "2024-01-15T00:00:00.000Z",
   "defer": null,
+  "planned": null,
   "estimatedMinutes": 30,
   "note": "Notes here",
   "added": "2024-01-01T10:00:00.000Z",
