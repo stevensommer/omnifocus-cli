@@ -42,7 +42,10 @@ const OF_METHODS = [
   'getFolder',
 ] as const;
 
-function makeMockOf(returns: Partial<Record<string, unknown>> = {}): { of: OmniFocus; calls: Call[] } {
+function makeMockOf(returns: Partial<Record<string, unknown>> = {}): {
+  of: OmniFocus;
+  calls: Call[];
+} {
   const calls: Call[] = [];
   const of: Record<string, unknown> = {};
   for (const method of OF_METHODS) {
@@ -60,7 +63,11 @@ function tool(tools: ToolSpec[], name: string): ToolSpec {
   return found;
 }
 
-async function callTool(tools: ToolSpec[], name: string, args: Record<string, unknown> = {}): Promise<unknown> {
+async function callTool(
+  tools: ToolSpec[],
+  name: string,
+  args: Record<string, unknown> = {}
+): Promise<unknown> {
   const result = await tool(tools, name).handler(args);
   const block = result.content[0] as { text: string };
   return JSON.parse(block.text);
@@ -122,7 +129,9 @@ describe('buildTools catalogue', () => {
 describe('search_tools', () => {
   it('is part of the searchable catalogue (no drift from registered tools)', async () => {
     const tools = buildTools(makeMockOf().of);
-    const { tools: matches } = (await callTool(tools, 'search_tools', { query: 'search_tools' })) as {
+    const { tools: matches } = (await callTool(tools, 'search_tools', {
+      query: 'search_tools',
+    })) as {
       tools: Array<{ name: string }>;
     };
     expect(matches.map((m) => m.name)).toContain('search_tools');
@@ -133,12 +142,18 @@ describe('search_tools', () => {
     const { tools: matches } = (await callTool(tools, 'search_tools', { query: '^create_' })) as {
       tools: Array<{ name: string }>;
     };
-    expect(matches.map((m) => m.name).sort()).toEqual(['create_project', 'create_tag', 'create_task']);
+    expect(matches.map((m) => m.name).sort()).toEqual([
+      'create_project',
+      'create_tag',
+      'create_task',
+    ]);
   });
 
   it('matches by description text, not just name', async () => {
     const tools = buildTools(makeMockOf().of);
-    const { tools: matches } = (await callTool(tools, 'search_tools', { query: 'perspective' })) as {
+    const { tools: matches } = (await callTool(tools, 'search_tools', {
+      query: 'perspective',
+    })) as {
       tools: Array<{ name: string }>;
     };
     // get_perspective_tasks matches by name; list_perspectives matches too.
@@ -148,10 +163,14 @@ describe('search_tools', () => {
 
   it('returns objects with name and description', async () => {
     const tools = buildTools(makeMockOf().of);
-    const { tools: matches } = (await callTool(tools, 'search_tools', { query: 'get_inbox_count' })) as {
+    const { tools: matches } = (await callTool(tools, 'search_tools', {
+      query: 'get_inbox_count',
+    })) as {
       tools: Array<{ name: string; description: string }>;
     };
-    expect(matches).toEqual([{ name: 'get_inbox_count', description: 'Get the number of inbox tasks' }]);
+    expect(matches).toEqual([
+      { name: 'get_inbox_count', description: 'Get the number of inbox tasks' },
+    ]);
   });
 
   it('reports invalid regex instead of throwing', async () => {
@@ -167,14 +186,20 @@ describe('tool handlers map arguments to OmniFocus calls', () => {
     const tools = buildTools(of);
     const result = await callTool(tools, 'create_task', { name: 'Buy milk', flagged: true });
     expect(result).toEqual({ id: 'x1', name: 'Buy milk' });
-    expect(calls).toContainEqual({ method: 'createTask', args: [{ name: 'Buy milk', flagged: true }] });
+    expect(calls).toContainEqual({
+      method: 'createTask',
+      args: [{ name: 'Buy milk', flagged: true }],
+    });
   });
 
   it('update_task splits idOrName from the update options', async () => {
     const { of, calls } = makeMockOf({ updateTask: { id: 't1' } });
     const tools = buildTools(of);
     await callTool(tools, 'update_task', { idOrName: 't1', name: 'Renamed', flagged: false });
-    expect(calls).toContainEqual({ method: 'updateTask', args: ['t1', { name: 'Renamed', flagged: false }] });
+    expect(calls).toContainEqual({
+      method: 'updateTask',
+      args: ['t1', { name: 'Renamed', flagged: false }],
+    });
   });
 
   it('delete_task calls deleteTask and returns a deleted marker', async () => {

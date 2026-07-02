@@ -109,8 +109,12 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       { query: z.string().describe('Search query') },
       async ({ query }) => jsonResponse(await of.searchTasks(query))
     ),
-    def('get_task_stats', 'Get task statistics', {}, async () => jsonResponse(await of.getTaskStats())),
-    def('list_inbox', 'List all inbox tasks', {}, async () => jsonResponse(await of.listInboxTasks())),
+    def('get_task_stats', 'Get task statistics', {}, async () =>
+      jsonResponse(await of.getTaskStats())
+    ),
+    def('list_inbox', 'List all inbox tasks', {}, async () =>
+      jsonResponse(await of.listInboxTasks())
+    ),
     def('get_inbox_count', 'Get the number of inbox tasks', {}, async () =>
       jsonResponse({ count: await of.getInboxCount() })
     ),
@@ -137,7 +141,10 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         name: z.string().describe('Project name'),
         note: z.string().optional().describe('Project note'),
         folder: z.string().optional().describe('Folder to create project in'),
-        sequential: z.boolean().optional().describe('Sequential project (tasks must be done in order)'),
+        sequential: z
+          .boolean()
+          .optional()
+          .describe('Sequential project (tasks must be done in order)'),
         tags: z.array(z.string()).optional().describe('Tags to assign'),
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('Initial status'),
       },
@@ -166,14 +173,18 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         return jsonResponse({ deleted: true });
       }
     ),
-    def('get_project_stats', 'Get project statistics', {}, async () => jsonResponse(await of.getProjectStats())),
+    def('get_project_stats', 'Get project statistics', {}, async () =>
+      jsonResponse(await of.getProjectStats())
+    ),
     def('list_perspectives', 'List all available perspectives', {}, async () =>
       jsonResponse(await of.listPerspectives())
     ),
     def(
       'get_perspective_tasks',
       'Get tasks from a specific perspective',
-      { name: z.string().describe('Perspective name (e.g., Inbox, Flagged, or custom perspective)') },
+      {
+        name: z.string().describe('Perspective name (e.g., Inbox, Flagged, or custom perspective)'),
+      },
       async ({ name }) => jsonResponse(await of.getPerspectiveTasks(name))
     ),
     def(
@@ -221,7 +232,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         return jsonResponse({ deleted: true });
       }
     ),
-    def('get_tag_stats', 'Get tag statistics', {}, async () => jsonResponse(await of.getTagStats())),
+    def('get_tag_stats', 'Get tag statistics', {}, async () =>
+      jsonResponse(await of.getTagStats())
+    ),
     def(
       'list_folders',
       'List all folders',
@@ -235,7 +248,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         idOrName: z.string().describe('Folder ID or name'),
         includeDropped: z.boolean().optional().describe('Include dropped children'),
       },
-      async ({ idOrName, includeDropped }) => jsonResponse(await of.getFolder(idOrName, { includeDropped }))
+      async ({ idOrName, includeDropped }) =>
+        jsonResponse(await of.getFolder(idOrName, { includeDropped }))
     ),
   ];
 
@@ -246,7 +260,11 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'search_tools',
       'Search for available tools by name or description using regex. Returns matching tool names.',
       {
-        query: z.string().describe('Regex pattern to match against tool names and descriptions (case-insensitive)'),
+        query: z
+          .string()
+          .describe(
+            'Regex pattern to match against tool names and descriptions (case-insensitive)'
+          ),
       },
       async ({ query }) => {
         try {
