@@ -129,11 +129,55 @@ of search "query"                   # Search tasks
 
 ### MCP Server
 
-Run as an MCP server for AI agent integration:
+`of mcp` runs the CLI as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, exposing every OmniFocus operation as an MCP tool so agents (Claude Desktop, etc.) can manage your tasks directly.
 
 ```bash
 of mcp
 ```
+
+#### Connecting from Claude Desktop
+
+Add the server to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "omnifocus": {
+      "command": "of",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+If `of` isn't on the GUI app's `PATH`, use an absolute path (`which of`) or run via npx instead:
+
+```json
+{
+  "mcpServers": {
+    "omnifocus": {
+      "command": "npx",
+      "args": ["-y", "@stephendolan/omnifocus-cli", "mcp"]
+    }
+  }
+}
+```
+
+The first connection triggers the same macOS Automation permission prompt as the CLI.
+
+#### Available tools
+
+| Domain | Tools |
+| --- | --- |
+| Tasks | `list_tasks`, `get_task`, `create_task`, `update_task`, `delete_task`, `search_tasks`, `get_task_stats` |
+| Inbox | `list_inbox`, `get_inbox_count` |
+| Projects | `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `get_project_stats` |
+| Tags | `list_tags`, `get_tag`, `create_tag`, `update_tag`, `delete_tag`, `get_tag_stats` |
+| Folders | `list_folders`, `get_folder` |
+| Perspectives | `list_perspectives`, `get_perspective_tasks` |
+| Discovery | `search_tools` |
+
+Every tool returns the same JSON shape as its CLI counterpart. `search_tools` takes a case-insensitive regex and returns matching tool names/descriptions — useful for agents that want to discover capabilities without loading every schema up front.
 
 ## JSON Output
 
