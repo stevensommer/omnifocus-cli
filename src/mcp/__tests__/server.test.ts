@@ -124,6 +124,28 @@ describe('buildTools catalogue', () => {
       expect(typeof t.handler).toBe('function');
     }
   });
+
+  // Claude Desktop groups connector tools by their annotations (read-only vs
+  // write/destructive) and displays the title; tools missing either fall into
+  // an unlabelled "Other tools" bucket with raw snake_case names.
+  it('gives every tool a title and complete annotations', () => {
+    for (const t of buildTools(makeMockOf().of)) {
+      expect(t.title.length).toBeGreaterThan(0);
+      expect(typeof t.annotations.readOnlyHint).toBe('boolean');
+      expect(typeof t.annotations.destructiveHint).toBe('boolean');
+      expect(typeof t.annotations.idempotentHint).toBe('boolean');
+      expect(t.annotations.openWorldHint).toBe(false);
+    }
+  });
+
+  it('annotates tools consistently with their naming convention', () => {
+    for (const t of buildTools(makeMockOf().of)) {
+      const readOnly = /^(list_|get_|search_)/.test(t.name);
+      expect(t.annotations.readOnlyHint, t.name).toBe(readOnly);
+      const destructive = /^(update_|delete_)/.test(t.name);
+      expect(t.annotations.destructiveHint, t.name).toBe(destructive);
+    }
+  });
 });
 
 describe('search_tools', () => {
