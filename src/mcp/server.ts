@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z, type ZodRawShape } from 'zod';
 import { OmniFocus } from '../lib/omnifocus.js';
 
@@ -12,10 +12,46 @@ import { OmniFocus } from '../lib/omnifocus.js';
  */
 export interface ToolSpec {
   name: string;
+  title: string;
   description: string;
+  annotations: ToolAnnotations;
   schema: ZodRawShape;
   handler: (args: Record<string, unknown>) => CallToolResult | Promise<CallToolResult>;
 }
+
+/**
+ * Annotation presets. MCP clients (Claude Desktop's connector UI in
+ * particular) group tools by these hints — read-only vs write vs destructive —
+ * and tools without annotations all land in an undifferentiated "Other tools"
+ * bucket. Every tool must use one of these presets. `openWorldHint` is false
+ * throughout: everything operates on the local OmniFocus database.
+ */
+const READ: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+const CREATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+const UPDATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+// Deletes are not idempotent: lookups accept a name, so a repeated call can
+// match (and delete) a different item of the same name.
+const DELETE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
 
 function jsonResponse(data: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
@@ -28,11 +64,13 @@ function jsonResponse(data: unknown): CallToolResult {
  */
 function def<S extends ZodRawShape>(
   name: string,
+  title: string,
   description: string,
+  annotations: ToolAnnotations,
   schema: S,
   handler: (args: z.infer<z.ZodObject<S>>) => CallToolResult | Promise<CallToolResult>
 ): ToolSpec {
-  return { name, description, schema, handler: handler as ToolSpec['handler'] };
+  return { name, title, description, annotations, schema, handler: handler as ToolSpec['handler'] };
 }
 
 /**
@@ -44,7 +82,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
   const tools: ToolSpec[] = [
     def(
       'list_tasks',
+      'List tasks',
       'List tasks with optional filtering',
+      READ,
       {
         includeCompleted: z.boolean().optional().describe('Include completed tasks'),
         includeDropped: z.boolean().optional().describe('Include dropped tasks'),
@@ -56,13 +96,17 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'get_task',
+      'Get task',
       'Get a specific task by ID or name',
+      READ,
       { idOrName: z.string().describe('Task ID or name') },
       async ({ idOrName }) => jsonResponse(await of.getTask(idOrName))
     ),
     def(
       'create_task',
+      'Create task',
       'Create a new task',
+      CREATE,
       {
         name: z.string().describe('Task name'),
         note: z.string().optional().describe('Task note'),
@@ -78,7 +122,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'update_task',
+      'Update task',
       'Update an existing task',
+      UPDATE,
       {
         idOrName: z.string().describe('Task ID or name'),
         name: z.string().optional().describe('New task name'),
@@ -96,7 +142,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'delete_task',
+      'Delete task',
       'Delete a task',
+      DELETE,
       { idOrName: z.string().describe('Task ID or name') },
       async ({ idOrName }) => {
         await of.deleteTask(idOrName);
@@ -105,22 +153,26 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'search_tasks',
+      'Search tasks',
       'Search tasks by name or note content',
+      READ,
       { query: z.string().describe('Search query') },
       async ({ query }) => jsonResponse(await of.searchTasks(query))
     ),
-    def('get_task_stats', 'Get task statistics', {}, async () =>
+    def('get_task_stats', 'Get task statistics', 'Get task statistics', READ, {}, async () =>
       jsonResponse(await of.getTaskStats())
     ),
-    def('list_inbox', 'List all inbox tasks', {}, async () =>
+    def('list_inbox', 'List inbox tasks', 'List all inbox tasks', READ, {}, async () =>
       jsonResponse(await of.listInboxTasks())
     ),
-    def('get_inbox_count', 'Get the number of inbox tasks', {}, async () =>
+    def('get_inbox_count', 'Get inbox count', 'Get the number of inbox tasks', READ, {}, async () =>
       jsonResponse({ count: await of.getInboxCount() })
     ),
     def(
       'list_projects',
+      'List projects',
       'List projects with optional filtering',
+      READ,
       {
         includeDropped: z.boolean().optional().describe('Include dropped projects'),
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('Filter by status'),
@@ -130,13 +182,17 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'get_project',
+      'Get project',
       'Get a specific project by ID or name',
+      READ,
       { idOrName: z.string().describe('Project ID or name') },
       async ({ idOrName }) => jsonResponse(await of.getProject(idOrName))
     ),
     def(
       'create_project',
+      'Create project',
       'Create a new project',
+      CREATE,
       {
         name: z.string().describe('Project name'),
         note: z.string().optional().describe('Project note'),
@@ -152,7 +208,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'update_project',
+      'Update project',
       'Update an existing project',
+      UPDATE,
       {
         idOrName: z.string().describe('Project ID or name'),
         name: z.string().optional().describe('New project name'),
@@ -166,22 +224,38 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'delete_project',
+      'Delete project',
       'Delete a project',
+      DELETE,
       { idOrName: z.string().describe('Project ID or name') },
       async ({ idOrName }) => {
         await of.deleteProject(idOrName);
         return jsonResponse({ deleted: true });
       }
     ),
-    def('get_project_stats', 'Get project statistics', {}, async () =>
-      jsonResponse(await of.getProjectStats())
-    ),
-    def('list_perspectives', 'List all available perspectives', {}, async () =>
-      jsonResponse(await of.listPerspectives())
+    def(
+      'get_project_stats',
+      'Get project statistics',
+      'Get project statistics',
+      READ,
+      {},
+      async () => jsonResponse(await of.getProjectStats())
     ),
     def(
+      'list_perspectives',
+      'List perspectives',
+      'List all available perspectives',
+      READ,
+      {},
+      async () => jsonResponse(await of.listPerspectives())
+    ),
+    // Read-only for OmniFocus data, though it does switch the frontmost
+    // window's perspective as a side effect of traversing the content tree.
+    def(
       'get_perspective_tasks',
+      'Get perspective tasks',
       'Get tasks from a specific perspective',
+      READ,
       {
         name: z.string().describe('Perspective name (e.g., Inbox, Flagged, or custom perspective)'),
       },
@@ -189,7 +263,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'list_tags',
+      'List tags',
       'List all tags with optional filtering and sorting',
+      READ,
       {
         unusedDays: z.number().optional().describe('Only show tags unused for this many days'),
         sortBy: z.enum(['name', 'usage', 'activity']).optional().describe('Sort order'),
@@ -199,13 +275,17 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'get_tag',
+      'Get tag',
       'Get a specific tag by ID or name',
+      READ,
       { idOrName: z.string().describe('Tag ID, name, or path (e.g., "Parent/Child")') },
       async ({ idOrName }) => jsonResponse(await of.getTag(idOrName))
     ),
     def(
       'create_tag',
+      'Create tag',
       'Create a new tag',
+      CREATE,
       {
         name: z.string().describe('Tag name'),
         parent: z.string().optional().describe('Parent tag name or path'),
@@ -215,7 +295,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'update_tag',
+      'Update tag',
       'Update an existing tag',
+      UPDATE,
       {
         idOrName: z.string().describe('Tag ID, name, or path'),
         name: z.string().optional().describe('New tag name'),
@@ -225,25 +307,31 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def(
       'delete_tag',
+      'Delete tag',
       'Delete a tag',
+      DELETE,
       { idOrName: z.string().describe('Tag ID, name, or path') },
       async ({ idOrName }) => {
         await of.deleteTag(idOrName);
         return jsonResponse({ deleted: true });
       }
     ),
-    def('get_tag_stats', 'Get tag statistics', {}, async () =>
+    def('get_tag_stats', 'Get tag statistics', 'Get tag statistics', READ, {}, async () =>
       jsonResponse(await of.getTagStats())
     ),
     def(
       'list_folders',
+      'List folders',
       'List all folders',
+      READ,
       { includeDropped: z.boolean().optional().describe('Include dropped folders') },
       async (filters) => jsonResponse(await of.listFolders(filters))
     ),
     def(
       'get_folder',
+      'Get folder',
       'Get a specific folder by ID or name',
+      READ,
       {
         idOrName: z.string().describe('Folder ID or name'),
         includeDropped: z.boolean().optional().describe('Include dropped children'),
@@ -258,7 +346,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
   tools.push(
     def(
       'search_tools',
+      'Search tools',
       'Search for available tools by name or description using regex. Returns matching tool names.',
+      READ,
       {
         query: z
           .string()
@@ -291,7 +381,18 @@ export async function runMcpServer() {
 
   const of = new OmniFocus();
   for (const tool of buildTools(of)) {
-    server.tool(tool.name, tool.description, tool.schema, tool.handler);
+    server.registerTool(
+      tool.name,
+      {
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.schema,
+        // Duplicate the title into annotations for clients that predate the
+        // top-level `title` field and fall back to `annotations.title`.
+        annotations: { title: tool.title, ...tool.annotations },
+      },
+      tool.handler
+    );
   }
 
   const transport = new StdioServerTransport();

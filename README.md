@@ -180,6 +180,8 @@ The first connection triggers the same macOS Automation permission prompt as the
 
 Every tool returns the same JSON shape as its CLI counterpart. `search_tools` takes a case-insensitive regex and returns matching tool names/descriptions — useful for agents that want to discover capabilities without loading every schema up front.
 
+Each tool also declares a human-readable title and [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), so clients like Claude Desktop can display friendly names and group tools into read-only vs write/delete categories instead of listing them all under "Other tools".
+
 ## JSON Output
 
 All commands output JSON. Use `--compact` for single-line output.
