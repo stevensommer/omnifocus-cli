@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z, type ZodRawShape } from 'zod';
 import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
+import { registerApps } from './apps.js';
 
 /**
  * A single MCP tool definition. `buildTools()` returns these as the one source
@@ -753,6 +754,8 @@ export async function runMcpServer() {
       tool.handler
     );
   }
+
+  registerApps(server, of);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
