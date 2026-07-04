@@ -8,16 +8,29 @@ import { OmniFocus } from '../omnifocus.js';
  * and bun's native runner).
  */
 
-function captureScript(returnValue: string): { of: OmniFocus; scripts: string[] } {
+interface CapturedCall {
+  script: string;
+  opts: { timeoutMs?: number; signal?: AbortSignal } | undefined;
+}
+
+function captureScript(returnValue: string): {
+  of: OmniFocus;
+  scripts: string[];
+  calls: CapturedCall[];
+} {
   const of = new OmniFocus();
   const scripts: string[] = [];
-  (of as unknown as { executeJXA: (script: string) => Promise<string> }).executeJXA = async (
-    script: string
-  ) => {
+  const calls: CapturedCall[] = [];
+  (
+    of as unknown as {
+      executeJXA: (script: string, opts?: CapturedCall['opts']) => Promise<string>;
+    }
+  ).executeJXA = async (script, opts) => {
     scripts.push(script);
+    calls.push({ script, opts });
     return returnValue;
   };
-  return { of, scripts };
+  return { of, scripts, calls };
 }
 
 describe('updateProject script generation', () => {
@@ -45,4 +58,62 @@ describe('updateTask script generation', () => {
     await of.updateTask('My Task', { project: 'House' });
     expect(scripts[0]).toContain('moveTasks([task], targetProject)');
   });
+});
+
+describe('inbox tools are headless', () => {
+  it('listInboxTasks iterates the inbox global instead of a window perspective', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listInboxTasks();
+    expect(scripts[0]).toContain('for (const task of inbox)');
+    expect(scripts[0]).not.toContain('windows');
+    expect(scripts[0]).not.toContain('Perspective');
+  });
+
+  it('getInboxCount reads inbox.length without a window', async () => {
+    const { of, scripts } = captureScript('{"count": 4}');
+    const count = await of.getInboxCount();
+    expect(count).toBe(4);
+    expect(scripts[0]).toContain('inbox.length');
+    expect(scripts[0]).not.toContain('windows');
+  });
+});
+
+describe('getPerspectiveTasks cancellation plumbing', () => {
+  it('forwards the AbortSignal and keeps the 60s timeout', async () => {
+    const { of, calls } = captureScript('[]');
+    const controller = new AbortController();
+    await of.getPerspectiveTasks('Today', { signal: controller.signal });
+    expect(calls[0].opts?.timeoutMs).toBe(60000);
+    expect(calls[0].opts?.signal).toBe(controller.signal);
+  });
+});
+
+// Real end-to-end abort: spawns osascript with a plain JXA sleep (no
+// OmniFocus involved) and aborts it. macOS only — CI runs on ubuntu.
+const itDarwin = process.platform === 'darwin' ? it : it.skip;
+
+describe('executeJXA abort', () => {
+  itDarwin(
+    'kills the osascript child and reports a cancellation error',
+    async () => {
+      const of = new OmniFocus();
+      const exec = (
+        of as unknown as {
+          executeJXA: (s: string, o?: { signal?: AbortSignal }) => Promise<string>;
+        }
+      ).executeJXA.bind(of);
+
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200);
+      const started = Date.now();
+      await expect(
+        exec('ObjC.import("Foundation"); $.NSThread.sleepForTimeInterval(15); "done";', {
+          signal: controller.signal,
+        })
+      ).rejects.toThrow('Operation cancelled by client');
+      // Must reject promptly after abort, not after the 15s sleep completes.
+      expect(Date.now() - started).toBeLessThan(5000);
+    },
+    10000
+  );
 });

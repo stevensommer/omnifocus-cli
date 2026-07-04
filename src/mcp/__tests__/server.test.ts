@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { buildTools, SERVER_INSTRUCTIONS, type ToolSpec } from '../server.js';
+import {
+  buildTools,
+  SERVER_INSTRUCTIONS,
+  startProgressHeartbeat,
+  type ToolCallExtra,
+  type ToolSpec,
+} from '../server.js';
 import type { OmniFocus } from '../../lib/omnifocus.js';
 
 /**
@@ -292,6 +298,75 @@ describe('handler failures become isError tool results (SEP-1303)', () => {
     await expect(tool(tools, 'get_task').handler({ idOrName: 'x' })).rejects.toBeInstanceOf(
       McpError
     );
+  });
+});
+
+describe('get_perspective_tasks cancellation and progress', () => {
+  it('forwards the request AbortSignal to OmniFocus', async () => {
+    const { of, calls } = makeMockOf({ getPerspectiveTasks: [] });
+    const tools = buildTools(of);
+    const controller = new AbortController();
+    await tool(tools, 'get_perspective_tasks').handler(
+      { name: 'Today' },
+      { signal: controller.signal }
+    );
+    const call = calls.find((c) => c.method === 'getPerspectiveTasks');
+    expect(call?.args).toEqual(['Today', { signal: controller.signal }]);
+  });
+
+  it('emits a progress notification when the client sent a progressToken', async () => {
+    const { of } = makeMockOf({ getPerspectiveTasks: [] });
+    const tools = buildTools(of);
+    const notifications: unknown[] = [];
+    const extra: ToolCallExtra = {
+      _meta: { progressToken: 42 },
+      sendNotification: async (n) => {
+        notifications.push(n);
+      },
+    };
+    await tool(tools, 'get_perspective_tasks').handler({ name: 'Today' }, extra);
+    expect(notifications.length).toBeGreaterThanOrEqual(1);
+    expect(notifications[0]).toMatchObject({
+      method: 'notifications/progress',
+      params: { progressToken: 42, progress: 1 },
+    });
+  });
+
+  it('sends no progress when the client did not send a token', async () => {
+    const { of } = makeMockOf({ getPerspectiveTasks: [] });
+    const tools = buildTools(of);
+    const notifications: unknown[] = [];
+    const extra: ToolCallExtra = {
+      sendNotification: async (n) => {
+        notifications.push(n);
+      },
+    };
+    await tool(tools, 'get_perspective_tasks').handler({ name: 'Today' }, extra);
+    expect(notifications).toHaveLength(0);
+  });
+});
+
+describe('startProgressHeartbeat', () => {
+  it('is a no-op without extra and stop() is safe to call', () => {
+    const stop = startProgressHeartbeat(undefined, 'working');
+    expect(() => stop()).not.toThrow();
+  });
+
+  it('keeps ticking on an interval until stopped', async () => {
+    const notifications: unknown[] = [];
+    const extra: ToolCallExtra = {
+      _meta: { progressToken: 'tok' },
+      sendNotification: async (n) => {
+        notifications.push(n);
+      },
+    };
+    const stop = startProgressHeartbeat(extra, 'working', 20);
+    await new Promise((r) => setTimeout(r, 70));
+    stop();
+    const countWhenStopped = notifications.length;
+    expect(countWhenStopped).toBeGreaterThanOrEqual(2);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(notifications.length).toBe(countWhenStopped);
   });
 });
 

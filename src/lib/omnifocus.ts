@@ -3,6 +3,7 @@ import { writeFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { promisify } from 'util';
+import { OmniFocusCliError } from './errors.js';
 import type {
   Task,
   Project,
@@ -246,7 +247,11 @@ export class OmniFocus {
     }
   `;
 
-  private async executeJXA(script: string, timeoutMs = 30000): Promise<string> {
+  private async executeJXA(
+    script: string,
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<string> {
+    const { timeoutMs = 30000, signal } = opts;
     const tmpFile = join(tmpdir(), `omnifocus-${Date.now()}.js`);
 
     try {
@@ -255,9 +260,18 @@ export class OmniFocus {
       const { stdout } = await execFileAsync('osascript', ['-l', 'JavaScript', tmpFile], {
         timeout: timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
+        // An aborted signal kills the osascript child, so a cancelled MCP
+        // request doesn't leave OmniFocus mid-operation (e.g. half-way
+        // through a perspective switch).
+        signal,
       });
 
       return stdout.trim();
+    } catch (error) {
+      if (signal?.aborted) {
+        throw new OmniFocusCliError('Operation cancelled by client', 499);
+      }
+      throw error;
     } finally {
       try {
         await unlink(tmpFile);
@@ -568,13 +582,32 @@ export class OmniFocus {
     await this.executeJXA(this.wrapOmniScript(omniScript));
   }
 
+  // Inbox tools use the headless `inbox` global (root inbox items) rather
+  // than traversing the Inbox perspective, which needed an open OmniFocus
+  // window and paid a perspective-switch delay.
   async listInboxTasks(): Promise<Task[]> {
-    return this.getPerspectiveTasks('Inbox');
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const results = [];
+        for (const task of inbox) {
+          results.push(serializeTask(task));
+        }
+        return JSON.stringify(results);
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
   }
 
   async getInboxCount(): Promise<number> {
-    const tasks = await this.getPerspectiveTasks('Inbox');
-    return tasks.length;
+    const omniScript = `
+      (() => JSON.stringify({ count: inbox.length }))();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output).count;
   }
 
   async searchTasks(query: string): Promise<Task[]> {
@@ -653,7 +686,10 @@ export class OmniFocus {
     return JSON.parse(output);
   }
 
-  async getPerspectiveTasks(perspectiveName: string): Promise<Task[]> {
+  async getPerspectiveTasks(
+    perspectiveName: string,
+    opts: { signal?: AbortSignal } = {}
+  ): Promise<Task[]> {
     const omniScript = `
       ${this.OMNI_HELPERS}
       (() => {
@@ -706,7 +742,10 @@ export class OmniFocus {
       })();
     `;
 
-    const output = await this.executeJXA(this.wrapOmniScript(omniScript), 60000);
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript), {
+      timeoutMs: 60000,
+      signal: opts.signal,
+    });
     return JSON.parse(output);
   }
 
