@@ -423,7 +423,7 @@ export class OmniFocus {
     if (options.folder !== undefined && options.folder) {
       updates.push(`
         const targetFolder = findByName(flattenedFolders, "${this.escapeString(options.folder)}", "Folder");
-        moveProjects([project], targetFolder);
+        moveSections([project], targetFolder);
       `);
     }
     if (options.tags !== undefined) {
