@@ -165,6 +165,37 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         flagged: z.boolean().optional().describe('Only show flagged tasks'),
         project: z.string().optional().describe('Filter by project name'),
         tag: z.string().optional().describe('Filter by tag name'),
+        status: z
+          .enum([
+            'actionable',
+            'available',
+            'next',
+            'blocked',
+            'dueSoon',
+            'overdue',
+            'completed',
+            'dropped',
+          ])
+          .optional()
+          .describe(
+            'Filter by OmniFocus task status; "actionable" matches available|next|dueSoon|overdue (what can be worked on now)'
+          ),
+        dueBefore: z.string().optional().describe('Effective due date before (ISO 8601)'),
+        dueAfter: z.string().optional().describe('Effective due date after (ISO 8601)'),
+        deferBefore: z.string().optional().describe('Effective defer date before (ISO 8601)'),
+        deferAfter: z.string().optional().describe('Effective defer date after (ISO 8601)'),
+        plannedBefore: z.string().optional().describe('Planned date before (ISO 8601)'),
+        plannedAfter: z.string().optional().describe('Planned date after (ISO 8601)'),
+        completedBefore: z
+          .string()
+          .optional()
+          .describe('Completed before (ISO 8601; implies includeCompleted)'),
+        completedAfter: z
+          .string()
+          .optional()
+          .describe('Completed after (ISO 8601; implies includeCompleted)'),
+        addedBefore: z.string().optional().describe('Created before (ISO 8601)'),
+        addedAfter: z.string().optional().describe('Created after (ISO 8601)'),
       },
       async (filters) => jsonResponse(await of.listTasks(filters))
     ),
@@ -213,6 +244,21 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         completed: z.boolean().optional().describe('Mark complete/incomplete'),
       },
       async ({ idOrName, ...options }) => jsonResponse(await of.updateTask(idOrName, options))
+    ),
+    def(
+      'drop_task',
+      'Drop task',
+      'Drop a task: abandon it while keeping its history (GTD-style, unlike delete)',
+      UPDATE,
+      {
+        idOrName: z.string().describe('Task ID or name'),
+        allOccurrences: z
+          .boolean()
+          .optional()
+          .describe('Also stop future repeats of a repeating task (default false)'),
+      },
+      async ({ idOrName, allOccurrences }) =>
+        jsonResponse(await of.dropTask(idOrName, { allOccurrences }))
     ),
     def(
       'delete_task',

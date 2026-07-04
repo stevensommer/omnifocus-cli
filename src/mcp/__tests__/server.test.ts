@@ -26,6 +26,7 @@ const OF_METHODS = [
   'getTask',
   'createTask',
   'updateTask',
+  'dropTask',
   'deleteTask',
   'searchTasks',
   'getTaskStats',
@@ -90,6 +91,7 @@ const EXPECTED_TOOL_NAMES = [
   'get_task',
   'create_task',
   'update_task',
+  'drop_task',
   'delete_task',
   'search_tasks',
   'get_task_stats',
@@ -151,7 +153,7 @@ describe('buildTools catalogue', () => {
     for (const t of buildTools(makeMockOf().of)) {
       const readOnly = /^(list_|get_|search_)/.test(t.name);
       expect(t.annotations.readOnlyHint, t.name).toBe(readOnly);
-      const destructive = /^(update_|delete_)/.test(t.name);
+      const destructive = /^(update_|delete_|drop_)/.test(t.name);
       expect(t.annotations.destructiveHint, t.name).toBe(destructive);
     }
   });
@@ -244,6 +246,14 @@ describe('tool handlers map arguments to OmniFocus calls', () => {
     const result = await callTool(tools, 'delete_task', { idOrName: 'abc' });
     expect(result).toEqual({ deleted: true });
     expect(calls).toContainEqual({ method: 'deleteTask', args: ['abc'] });
+  });
+
+  it('drop_task forwards allOccurrences and returns the dropped task', async () => {
+    const { of, calls } = makeMockOf({ dropTask: { id: 't1', dropped: true } });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'drop_task', { idOrName: 't1', allOccurrences: true });
+    expect(result).toEqual({ id: 't1', dropped: true });
+    expect(calls).toContainEqual({ method: 'dropTask', args: ['t1', { allOccurrences: true }] });
   });
 
   it('get_inbox_count wraps the count in an object', async () => {

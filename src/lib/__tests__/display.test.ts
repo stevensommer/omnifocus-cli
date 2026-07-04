@@ -30,16 +30,22 @@ describe('isTaskOverdue', () => {
     dropped: false,
     effectivelyActive: true,
     flagged: false,
+    effectiveFlagged: false,
+    taskStatus: 'available',
     tags: [],
     note: null,
     project: null,
     due: null,
     defer: null,
     planned: null,
+    effectiveDefer: null,
+    effectiveDue: null,
     estimatedMinutes: null,
     completionDate: null,
+    dropDate: null,
     added: null,
     modified: null,
+    url: 'omnifocus:///task/test-id',
   };
 
   it('returns false when task has no due date', () => {
