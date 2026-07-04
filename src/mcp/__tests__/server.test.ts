@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildTools, type ToolSpec } from '../server.js';
+import { buildTools, SERVER_INSTRUCTIONS, type ToolSpec } from '../server.js';
 import type { OmniFocus } from '../../lib/omnifocus.js';
 
 /**
@@ -51,7 +51,9 @@ function makeMockOf(returns: Partial<Record<string, unknown>> = {}): {
   for (const method of OF_METHODS) {
     of[method] = async (...args: unknown[]) => {
       calls.push({ method, args });
-      return method in returns ? returns[method] : undefined;
+      const value = method in returns ? returns[method] : undefined;
+      if (value instanceof Error) throw value;
+      return value;
     };
   }
   return { of: of as unknown as OmniFocus, calls };
@@ -244,5 +246,43 @@ describe('tool handlers map arguments to OmniFocus calls', () => {
     const tools = buildTools(of);
     await callTool(tools, 'get_folder', { idOrName: 'Work', includeDropped: true });
     expect(calls).toContainEqual({ method: 'getFolder', args: ['Work', { includeDropped: true }] });
+  });
+});
+
+describe('handler failures become isError tool results (SEP-1303)', () => {
+  it('returns the structured CLI error JSON with isError, not a thrown protocol error', async () => {
+    const { of } = makeMockOf({ getTask: new Error('Task not found: xyz') });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'get_task').handler({ idOrName: 'xyz' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body).toEqual({
+      error: { name: 'omnifocus_error', detail: 'Task not found: xyz', statusCode: 404 },
+    });
+  });
+
+  it('maps unrecognised failures to a 500 error body', async () => {
+    const { of } = makeMockOf({ createTask: new Error('osascript blew up') });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'create_task').handler({ name: 'x' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error.statusCode).toBe(500);
+  });
+
+  it('successful calls do not set isError', async () => {
+    const { of } = makeMockOf({ getInboxCount: 3 });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'get_inbox_count').handler({});
+    expect(result.isError).toBeUndefined();
+  });
+});
+
+describe('server instructions', () => {
+  it('document the conventions the model needs', () => {
+    expect(SERVER_INSTRUCTIONS).toContain('idOrName');
+    expect(SERVER_INSTRUCTIONS).toContain('ISO 8601');
+    expect(SERVER_INSTRUCTIONS).toContain('get_perspective_tasks');
+    expect(SERVER_INSTRUCTIONS).toContain('search_tools');
   });
 });

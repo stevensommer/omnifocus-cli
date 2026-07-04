@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
+import { classifyError, OmniFocusCliError } from '../errors.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdtemp, writeFile, rm } from 'fs/promises';
@@ -77,6 +78,36 @@ handleError(error);
     await rm(tmp, { recursive: true, force: true });
   }
 }
+
+// classifyError is pure (no exitCode mutation), so unlike handleError it can
+// be exercised directly in-process.
+describe('classifyError', () => {
+  it('preserves OmniFocusCliError statusCode', () => {
+    expect(classifyError(new OmniFocusCliError('bad request', 400))).toEqual({
+      name: 'cli_error',
+      detail: 'bad request',
+      statusCode: 400,
+    });
+  });
+
+  it('maps "not found" to 404 and "Multiple" to 400', () => {
+    expect(classifyError(new Error('Task not found')).statusCode).toBe(404);
+    expect(classifyError(new Error('Multiple matches for "foo"')).statusCode).toBe(400);
+  });
+
+  it('defaults plain errors to 500 and non-errors to unknown_error', () => {
+    expect(classifyError(new Error('boom'))).toEqual({
+      name: 'omnifocus_error',
+      detail: 'boom',
+      statusCode: 500,
+    });
+    expect(classifyError('weird')).toEqual({
+      name: 'unknown_error',
+      detail: 'An unknown error occurred',
+      statusCode: 500,
+    });
+  });
+});
 
 describe('handleError', () => {
   beforeAll(() => {

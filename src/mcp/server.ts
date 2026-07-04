@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z, type ZodRawShape } from 'zod';
+import { classifyError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 
 /**
@@ -70,7 +71,20 @@ function def<S extends ZodRawShape>(
   schema: S,
   handler: (args: z.infer<z.ZodObject<S>>) => CallToolResult | Promise<CallToolResult>
 ): ToolSpec {
-  return { name, title, description, annotations, schema, handler: handler as ToolSpec['handler'] };
+  // Execution failures become isError tool results (per SEP-1303) carrying
+  // the same structured error JSON as the CLI, rather than protocol errors,
+  // so the calling model can read the failure and self-correct.
+  const safeHandler: ToolSpec['handler'] = async (args) => {
+    try {
+      return await handler(args as z.infer<z.ZodObject<S>>);
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) }],
+        isError: true,
+      };
+    }
+  };
+  return { name, title, description, annotations, schema, handler: safeHandler };
 }
 
 /**
@@ -373,11 +387,37 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
   return tools;
 }
 
+/**
+ * Injected by tsup at build time; absent when the source runs directly under
+ * vitest/bun, so guard with typeof rather than referencing it bare.
+ */
+const VERSION = typeof __VERSION__ !== 'undefined' ? __VERSION__ : '0.0.0-dev';
+
+/**
+ * Sent to clients at initialize and injected into the model's context.
+ * Conventions that otherwise live only in README/CLAUDE.md belong here —
+ * this is the one place the calling model is guaranteed to see them.
+ */
+export const SERVER_INSTRUCTIONS = `CLI-backed MCP server for OmniFocus on macOS. OmniFocus must be installed and running; the first call may trigger a macOS Automation permission prompt.
+
+- Tools taking "idOrName" accept a primary key ID (e.g. "kXu3B-LZfFH") or an exact name. IDs are unambiguous and preferred — get them from the list/search tools first.
+- Dates are ISO 8601 strings: "YYYY-MM-DD" or a full timestamp like "2026-07-04T10:00:00". Returned dates are ISO strings.
+- Tag names may be hierarchical paths like "Parent/Child".
+- get_perspective_tasks requires an OmniFocus window to be open, may take up to 60 seconds, and switches the visible perspective as a side effect. Other tools are headless.
+- Failed calls return a JSON body {"error": {"name", "detail", "statusCode"}} with isError set; a 404 usually means the idOrName didn't match anything.
+- Use search_tools (case-insensitive regex over tool names/descriptions) to discover capabilities.`;
+
 export async function runMcpServer() {
-  const server = new McpServer({
-    name: 'omnifocus',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'omnifocus',
+      title: 'OmniFocus',
+      version: VERSION,
+      description: 'Manage OmniFocus tasks, projects, tags, folders, and perspectives on this Mac',
+      websiteUrl: 'https://github.com/stephendolan/omnifocus-cli#readme',
+    },
+    { instructions: SERVER_INSTRUCTIONS }
+  );
 
   const of = new OmniFocus();
   for (const tool of buildTools(of)) {
