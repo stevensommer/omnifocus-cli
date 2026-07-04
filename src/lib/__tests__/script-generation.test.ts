@@ -182,6 +182,253 @@ describe('createTask script generation', () => {
   });
 });
 
+describe('completeProject script generation', () => {
+  it('uses markComplete, not raw status assignment (repeating projects)', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.completeProject('P');
+    expect(scripts[0]).toContain('project.markComplete();');
+    expect(scripts[0]).not.toContain('Project.Status.Done');
+    expect(scripts[0]).toContain('serializeProject(project)');
+  });
+
+  it('passes an explicit completion date through to markComplete', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.completeProject('P', { date: '2026-07-01' });
+    expect(scripts[0]).toContain('project.markComplete(new Date(');
+    expect(scripts[0]).toContain('2026-07-01');
+  });
+
+  it('incomplete uses markIncomplete', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.completeProject('P', { incomplete: true });
+    expect(scripts[0]).toContain('project.markIncomplete();');
+    expect(scripts[0]).not.toContain('markComplete(');
+  });
+
+  it('rejects an invalid completion date with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.completeProject('P', { date: 'nope' })).rejects.toThrow(
+      'Invalid completion date'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('review workflow script generation', () => {
+  it('serializeProject includes reviewInterval, lastReviewDate, and nextReviewDate', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.getProject('X');
+    expect(scripts[0]).toContain('steps: project.reviewInterval.steps');
+    expect(scripts[0]).toContain('unit: project.reviewInterval.unit');
+    expect(scripts[0]).toContain('lastReviewDate: isoOrNull(project.lastReviewDate)');
+    expect(scripts[0]).toContain('nextReviewDate: isoOrNull(project.nextReviewDate)');
+  });
+
+  it('listProjectsDueForReview compares nextReviewDate headlessly', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listProjectsDueForReview();
+    expect(scripts[0]).toContain('project.nextReviewDate');
+    expect(scripts[0]).toContain('Project.Status.Dropped');
+    expect(scripts[0]).not.toContain('Perspective');
+    expect(scripts[0]).not.toContain('windows');
+  });
+
+  it('markProjectReviewed sets lastReviewDate to now', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.markProjectReviewed('P');
+    expect(scripts[0]).toContain('project.lastReviewDate = new Date();');
+  });
+
+  it('review interval mutates the value object and assigns it back', async () => {
+    // Project.ReviewInterval is a value object: property writes on the live
+    // value do nothing — the docs require copy, mutate, assign back.
+    const { of, scripts } = captureScript('{}');
+    await of.updateProject('P', { reviewInterval: '2 weeks' });
+    expect(scripts[0]).toContain('const ri = project.reviewInterval;');
+    expect(scripts[0]).toContain('ri.steps = 2;');
+    expect(scripts[0]).toContain('ri.unit = \\"weeks\\"');
+    expect(scripts[0]).toContain('project.reviewInterval = ri;');
+  });
+
+  it('parses singular units and applies on create too', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.createProject({ name: 'P', reviewInterval: '1 month' });
+    expect(scripts[0]).toContain('ri.steps = 1;');
+    expect(scripts[0]).toContain('ri.unit = \\"months\\"');
+  });
+
+  it('rejects an unparseable review interval with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.updateProject('P', { reviewInterval: 'fortnightly' })).rejects.toThrow(
+      'Invalid review interval'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('updateTasks batch script generation', () => {
+  it('loops over ids in one script with per-id try/catch results', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.updateTasks(['t1', 't2'], { flagged: true });
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0]).toContain('[\\"t1\\",\\"t2\\"]');
+    expect(scripts[0]).toContain('const task = findTask(id);');
+    expect(scripts[0]).toContain('task.flagged = true;');
+    expect(scripts[0]).toContain('results.push({ id: id, ok: true, task: serializeTask(task) });');
+    expect(scripts[0]).toContain('ok: false');
+  });
+
+  it('batch complete emits markComplete', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.updateTasks(['t1'], { completed: true });
+    expect(scripts[0]).toContain('task.markComplete();');
+  });
+
+  it('date shifts read the current date, add days, and write back', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.updateTasks(['t1'], { shiftDueDays: 3, shiftDeferDays: -2 });
+    expect(scripts[0]).toContain('const d = task.dueDate;');
+    expect(scripts[0]).toContain('d.setDate(d.getDate() + 3)');
+    expect(scripts[0]).toContain('const d = task.deferDate;');
+    expect(scripts[0]).toContain('d.setDate(d.getDate() + -2)');
+    // Tasks without the date are skipped, not failed.
+    expect(scripts[0]).toContain('if (d) {');
+    expect(scripts[0]).not.toContain('task.plannedDate = d;');
+  });
+
+  it('rejects an empty id list and non-integer shifts with a 400', async () => {
+    const { of, scripts } = captureScript('[]');
+    await expect(of.updateTasks([], { flagged: true })).rejects.toThrow('No task ids given');
+    await expect(of.updateTasks(['t1'], { shiftDueDays: 1.5 })).rejects.toThrow(
+      'Invalid shiftDueDays'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('fuzzy matching script generation', () => {
+  it('searchProjects uses projectsMatching (Quick Open semantics)', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.searchProjects('reno');
+    expect(scripts[0]).toContain('projectsMatching(\\"reno\\")');
+  });
+
+  it('searchTags uses tagsMatching', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.searchTags('err');
+    expect(scripts[0]).toContain('tagsMatching(\\"err\\")');
+  });
+
+  it('searchFolders uses foldersMatching', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.searchFolders('wrk');
+    expect(scripts[0]).toContain('foldersMatching(\\"wrk\\")');
+  });
+
+  it('find helpers fall back to *Matching only for a single fuzzy hit', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.getTask('abc');
+    // The helpers are shared, so any script carries the fallbacks.
+    expect(scripts[0]).toContain('projectsMatching(idOrName)');
+    expect(scripts[0]).toContain('tagsMatching(idOrName)');
+    expect(scripts[0]).toContain('foldersMatching(idOrName)');
+    expect(scripts[0]).toContain('if (fuzzyMatches.length === 1) return fuzzyMatches[0];');
+    expect(scripts[0]).toContain('Close matches');
+  });
+});
+
+describe('cleanupInbox script generation', () => {
+  it('runs cleanUp() without touching containers when no container is given', async () => {
+    const { of, scripts } = captureScript('{"inboxBefore":2,"assigned":0,"inboxAfter":2}');
+    await of.cleanupInbox();
+    expect(scripts[0]).toContain('cleanUp();');
+    expect(scripts[0]).not.toContain('assignedContainer');
+  });
+
+  it('assigns only unassigned inbox tasks to the container, then cleans up', async () => {
+    const { of, scripts } = captureScript('{"inboxBefore":2,"assigned":2,"inboxAfter":0}');
+    await of.cleanupInbox({ container: 'Someday' });
+    expect(scripts[0]).toContain('findProject(\\"Someday\\")');
+    expect(scripts[0]).toContain('if (task.assignedContainer === null)');
+    expect(scripts[0]).toContain('task.assignedContainer = target;');
+    expect(scripts[0]).toContain('cleanUp();');
+  });
+});
+
+describe('undo/redo/sync script generation', () => {
+  it('undo is guarded by canUndo', async () => {
+    const { of, scripts } = captureScript('{"undone":true}');
+    const result = await of.undo();
+    expect(result).toEqual({ undone: true });
+    expect(scripts[0]).toContain('if (!canUndo)');
+    expect(scripts[0]).toContain('undo();');
+  });
+
+  it('redo is guarded by canRedo', async () => {
+    const { of, scripts } = captureScript('{"redone":true}');
+    await of.redo();
+    expect(scripts[0]).toContain('if (!canRedo)');
+    expect(scripts[0]).toContain('redo();');
+  });
+
+  it('syncNow calls save()', async () => {
+    const { of, scripts } = captureScript('{"saved":true}');
+    const result = await of.syncNow();
+    expect(result).toEqual({ saved: true });
+    expect(scripts[0]).toContain('save();');
+  });
+});
+
+describe('folder CRUD script generation', () => {
+  it('createFolder constructs a Folder, optionally under a parent', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.createFolder({ name: 'Areas' });
+    expect(scripts[0]).toContain('new Folder(\\"Areas\\")');
+
+    const second = captureScript('{}');
+    await second.of.createFolder({ name: 'Areas', parent: 'Life' });
+    expect(second.scripts[0]).toContain('findFolder(\\"Life\\")');
+    expect(second.scripts[0]).toContain('new Folder(\\"Areas\\", parentFolder)');
+  });
+
+  it('updateFolder renames, sets status, and moves via moveSections', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.updateFolder('Areas', { name: 'Zones', status: 'dropped', parent: 'Archive' });
+    expect(scripts[0]).toContain('folder.name = \\"Zones\\";');
+    expect(scripts[0]).toContain('folder.status = stringToFolderStatus(\\"dropped\\");');
+    expect(scripts[0]).toContain('moveSections([folder], destFolder)');
+  });
+
+  it('deleteFolder deletes via findFolder', async () => {
+    const { of, scripts } = captureScript('');
+    await of.deleteFolder('Areas');
+    expect(scripts[0]).toContain('deleteObject(findFolder(\\"Areas\\"))');
+  });
+
+  it('findFolder has a byIdentifier fast path', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.getFolder('F123');
+    expect(scripts[0]).toContain('Folder.byIdentifier(idOrName)');
+  });
+});
+
+describe('convertTaskToProject script generation', () => {
+  it('converts via convertTasksToProjects to the end of the library by default', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.convertTaskToProject('t1');
+    expect(scripts[0]).toContain('const destination = library.ending;');
+    expect(scripts[0]).toContain('convertTasksToProjects([task], destination)');
+    expect(scripts[0]).toContain('serializeProject(newProjects[0])');
+  });
+
+  it('targets a named folder when given', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.convertTaskToProject('t1', { folder: 'Work' });
+    expect(scripts[0]).toContain('findFolder(\\"Work\\")');
+    expect(scripts[0]).not.toContain('library.ending');
+  });
+});
+
 describe('dropTask script generation', () => {
   it('calls task.drop with allOccurrences and reserialises', async () => {
     const { of, scripts } = captureScript('{}');

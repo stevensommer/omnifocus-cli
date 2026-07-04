@@ -10,6 +10,7 @@ import { createSearchCommand } from './commands/search.js';
 import { createPerspectiveCommand } from './commands/perspective.js';
 import { createTagCommand } from './commands/tag.js';
 import { createFolderCommand } from './commands/folder.js';
+import { createRedoCommand, createSyncCommand, createUndoCommand } from './commands/database.js';
 import { createMcpCommand } from './commands/mcp.js';
 
 const program = new Command();
@@ -34,6 +35,9 @@ program.addCommand(createSearchCommand());
 program.addCommand(createPerspectiveCommand());
 program.addCommand(createTagCommand());
 program.addCommand(createFolderCommand());
+program.addCommand(createUndoCommand());
+program.addCommand(createRedoCommand());
+program.addCommand(createSyncCommand());
 program.addCommand(createMcpCommand());
 
 program.parseAsync().catch((err) => {

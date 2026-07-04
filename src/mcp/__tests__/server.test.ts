@@ -26,17 +26,24 @@ const OF_METHODS = [
   'getTask',
   'createTask',
   'updateTask',
+  'updateTasks',
   'dropTask',
   'deleteTask',
   'searchTasks',
+  'convertTaskToProject',
   'getTaskStats',
   'listInboxTasks',
   'getInboxCount',
+  'cleanupInbox',
   'listProjects',
   'getProject',
   'createProject',
   'updateProject',
+  'completeProject',
   'deleteProject',
+  'searchProjects',
+  'listProjectsDueForReview',
+  'markProjectReviewed',
   'getProjectStats',
   'listPerspectives',
   'getPerspectiveTasks',
@@ -45,9 +52,17 @@ const OF_METHODS = [
   'createTag',
   'updateTag',
   'deleteTag',
+  'searchTags',
   'getTagStats',
   'listFolders',
   'getFolder',
+  'createFolder',
+  'updateFolder',
+  'deleteFolder',
+  'searchFolders',
+  'undo',
+  'redo',
+  'syncNow',
 ] as const;
 
 function makeMockOf(returns: Partial<Record<string, unknown>> = {}): {
@@ -91,17 +106,24 @@ const EXPECTED_TOOL_NAMES = [
   'get_task',
   'create_task',
   'update_task',
+  'update_tasks',
   'drop_task',
   'delete_task',
   'search_tasks',
+  'convert_task_to_project',
   'get_task_stats',
   'list_inbox',
   'get_inbox_count',
+  'cleanup_inbox',
   'list_projects',
   'get_project',
   'create_project',
   'update_project',
+  'complete_project',
   'delete_project',
+  'search_projects',
+  'list_projects_due_for_review',
+  'mark_project_reviewed',
   'get_project_stats',
   'list_perspectives',
   'get_perspective_tasks',
@@ -110,9 +132,17 @@ const EXPECTED_TOOL_NAMES = [
   'create_tag',
   'update_tag',
   'delete_tag',
+  'search_tags',
   'get_tag_stats',
   'list_folders',
   'get_folder',
+  'create_folder',
+  'update_folder',
+  'delete_folder',
+  'search_folders',
+  'undo',
+  'redo',
+  'sync_now',
   'search_tools',
 ];
 
@@ -150,10 +180,15 @@ describe('buildTools catalogue', () => {
   });
 
   it('annotates tools consistently with their naming convention', () => {
+    // Verbs that mutate existing items (or rewind history) are destructive;
+    // undo/redo are matched exactly so a future undo_* read tool would fail
+    // this guard and force a deliberate decision here.
+    const destructivePattern = /^(update_|delete_|drop_|complete_|mark_|cleanup_)/;
+    const destructiveExact = new Set(['undo', 'redo']);
     for (const t of buildTools(makeMockOf().of)) {
       const readOnly = /^(list_|get_|search_)/.test(t.name);
       expect(t.annotations.readOnlyHint, t.name).toBe(readOnly);
-      const destructive = /^(update_|delete_|drop_)/.test(t.name);
+      const destructive = destructivePattern.test(t.name) || destructiveExact.has(t.name);
       expect(t.annotations.destructiveHint, t.name).toBe(destructive);
     }
   });
@@ -176,6 +211,7 @@ describe('search_tools', () => {
       tools: Array<{ name: string }>;
     };
     expect(matches.map((m) => m.name).sort()).toEqual([
+      'create_folder',
       'create_project',
       'create_tag',
       'create_task',
@@ -268,6 +304,132 @@ describe('tool handlers map arguments to OmniFocus calls', () => {
     const tools = buildTools(of);
     await callTool(tools, 'get_folder', { idOrName: 'Work', includeDropped: true });
     expect(calls).toContainEqual({ method: 'getFolder', args: ['Work', { includeDropped: true }] });
+  });
+
+  it('update_tasks splits ids from the shared updates and shift options', async () => {
+    const { of, calls } = makeMockOf({ updateTasks: [{ id: 't1', ok: true }] });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'update_tasks', {
+      ids: ['t1', 't2'],
+      flagged: true,
+      shiftDueDays: -2,
+    });
+    expect(result).toEqual([{ id: 't1', ok: true }]);
+    expect(calls).toContainEqual({
+      method: 'updateTasks',
+      args: [['t1', 't2'], { flagged: true, shiftDueDays: -2 }],
+    });
+  });
+
+  it('complete_project forwards date and incomplete', async () => {
+    const { of, calls } = makeMockOf({ completeProject: { id: 'p1', status: 'done' } });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'complete_project', {
+      idOrName: 'p1',
+      date: '2026-07-01',
+    });
+    expect(result).toEqual({ id: 'p1', status: 'done' });
+    expect(calls).toContainEqual({
+      method: 'completeProject',
+      args: ['p1', { date: '2026-07-01', incomplete: undefined }],
+    });
+  });
+
+  it('mark_project_reviewed forwards the idOrName', async () => {
+    const { of, calls } = makeMockOf({ markProjectReviewed: { id: 'p1' } });
+    const tools = buildTools(of);
+    await callTool(tools, 'mark_project_reviewed', { idOrName: 'p1' });
+    expect(calls).toContainEqual({ method: 'markProjectReviewed', args: ['p1'] });
+  });
+
+  it('create_project and update_project forward reviewInterval', async () => {
+    const { of, calls } = makeMockOf({ createProject: { id: 'p1' }, updateProject: { id: 'p1' } });
+    const tools = buildTools(of);
+    await callTool(tools, 'create_project', { name: 'P', reviewInterval: '1 week' });
+    await callTool(tools, 'update_project', { idOrName: 'p1', reviewInterval: '2 months' });
+    expect(calls).toContainEqual({
+      method: 'createProject',
+      args: [{ name: 'P', reviewInterval: '1 week' }],
+    });
+    expect(calls).toContainEqual({
+      method: 'updateProject',
+      args: ['p1', { reviewInterval: '2 months' }],
+    });
+  });
+
+  it('cleanup_inbox forwards the container', async () => {
+    const { of, calls } = makeMockOf({
+      cleanupInbox: { inboxBefore: 3, assigned: 3, inboxAfter: 0 },
+    });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'cleanup_inbox', { container: 'Someday' });
+    expect(result).toEqual({ inboxBefore: 3, assigned: 3, inboxAfter: 0 });
+    expect(calls).toContainEqual({ method: 'cleanupInbox', args: [{ container: 'Someday' }] });
+  });
+
+  it('convert_task_to_project forwards the folder option', async () => {
+    const { of, calls } = makeMockOf({ convertTaskToProject: { id: 'p9', name: 'Big thing' } });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'convert_task_to_project', {
+      idOrName: 't1',
+      folder: 'Work',
+    });
+    expect(result).toEqual({ id: 'p9', name: 'Big thing' });
+    expect(calls).toContainEqual({
+      method: 'convertTaskToProject',
+      args: ['t1', { folder: 'Work' }],
+    });
+  });
+
+  it('folder CRUD tools map to their OmniFocus methods', async () => {
+    const { of, calls } = makeMockOf({
+      createFolder: { id: 'f1' },
+      updateFolder: { id: 'f1' },
+    });
+    const tools = buildTools(of);
+    await callTool(tools, 'create_folder', { name: 'Areas', parent: 'Life' });
+    await callTool(tools, 'update_folder', { idOrName: 'f1', status: 'dropped' });
+    const deleted = await callTool(tools, 'delete_folder', { idOrName: 'f1' });
+    expect(deleted).toEqual({ deleted: true });
+    expect(calls).toContainEqual({
+      method: 'createFolder',
+      args: [{ name: 'Areas', parent: 'Life' }],
+    });
+    expect(calls).toContainEqual({ method: 'updateFolder', args: ['f1', { status: 'dropped' }] });
+    expect(calls).toContainEqual({ method: 'deleteFolder', args: ['f1'] });
+  });
+
+  it('fuzzy search tools forward the query', async () => {
+    const { of, calls } = makeMockOf({ searchProjects: [], searchTags: [], searchFolders: [] });
+    const tools = buildTools(of);
+    await callTool(tools, 'search_projects', { query: 'reno' });
+    await callTool(tools, 'search_tags', { query: 'err' });
+    await callTool(tools, 'search_folders', { query: 'wrk' });
+    expect(calls).toContainEqual({ method: 'searchProjects', args: ['reno'] });
+    expect(calls).toContainEqual({ method: 'searchTags', args: ['err'] });
+    expect(calls).toContainEqual({ method: 'searchFolders', args: ['wrk'] });
+  });
+
+  it('undo, redo, and sync_now return their status objects', async () => {
+    const { of, calls } = makeMockOf({
+      undo: { undone: true },
+      redo: { redone: true },
+      syncNow: { saved: true },
+    });
+    const tools = buildTools(of);
+    expect(await callTool(tools, 'undo')).toEqual({ undone: true });
+    expect(await callTool(tools, 'redo')).toEqual({ redone: true });
+    expect(await callTool(tools, 'sync_now')).toEqual({ saved: true });
+    expect(calls.map((c) => c.method)).toEqual(['undo', 'redo', 'syncNow']);
+  });
+
+  it('undo failures surface as isError results', async () => {
+    const { of } = makeMockOf({ undo: new Error('Nothing to undo') });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'undo').handler({});
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error.detail).toBe('Nothing to undo');
   });
 });
 

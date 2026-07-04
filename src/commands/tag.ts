@@ -45,6 +45,17 @@ export function createTagCommand(): Command {
     );
 
   command
+    .command('search <query>')
+    .description('Fuzzy-search tags (Quick Open matching)')
+    .action(
+      withErrorHandling(async (query) => {
+        const of = new OmniFocus();
+        const tags = await of.searchTags(query);
+        outputJson(tags);
+      })
+    );
+
+  command
     .command('view <idOrName>')
     .description('View tag details')
     .action(

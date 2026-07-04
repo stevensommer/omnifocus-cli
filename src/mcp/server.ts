@@ -272,6 +272,53 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       }
     ),
     def(
+      'update_tasks',
+      'Update many tasks',
+      'Apply the same updates to many tasks in a single OmniFocus round trip. Returns a per-id result array {id, ok, task?, error?}; an unresolved id records an error entry instead of failing the batch. The shift*Days options add N days (negative to pull earlier) to the existing date on each task, skipping tasks without that date.',
+      UPDATE,
+      {
+        ids: z.array(z.string()).describe('Task IDs or exact names to update'),
+        name: z.string().optional().describe('New task name (applied to every task)'),
+        note: z.string().optional().describe('New task note'),
+        project: z.string().optional().describe('Move to project'),
+        tags: z.array(z.string()).optional().describe('Replace tags'),
+        defer: z.string().optional().describe('New defer date (ISO 8601)'),
+        due: z.string().optional().describe('New due date (ISO 8601)'),
+        planned: z.string().optional().describe('New planned date (ISO 8601)'),
+        flagged: z.boolean().optional().describe('Flag/unflag the tasks'),
+        estimatedMinutes: z.number().optional().describe('New estimated duration'),
+        completed: z.boolean().optional().describe('Mark complete/incomplete'),
+        shiftDueDays: z
+          .number()
+          .int()
+          .optional()
+          .describe('Shift the due date of each task by N days (may be negative)'),
+        shiftDeferDays: z
+          .number()
+          .int()
+          .optional()
+          .describe('Shift the defer date of each task by N days (may be negative)'),
+        shiftPlannedDays: z
+          .number()
+          .int()
+          .optional()
+          .describe('Shift the planned date of each task by N days (may be negative)'),
+      },
+      async ({ ids, ...options }) => jsonResponse(await of.updateTasks(ids, options))
+    ),
+    def(
+      'convert_task_to_project',
+      'Convert task to project',
+      'Convert a task into a new project (child tasks come along). The project lands in the given folder, or at the end of the library.',
+      CREATE,
+      {
+        idOrName: z.string().describe('Task ID or name'),
+        folder: z.string().optional().describe('Destination folder ID or name'),
+      },
+      async ({ idOrName, folder }) =>
+        jsonResponse(await of.convertTaskToProject(idOrName, { folder }))
+    ),
+    def(
       'search_tasks',
       'Search tasks',
       'Search tasks by name or note content',
@@ -287,6 +334,19 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
     ),
     def('get_inbox_count', 'Get inbox count', 'Get the number of inbox tasks', READ, {}, async () =>
       jsonResponse({ count: await of.getInboxCount() })
+    ),
+    def(
+      'cleanup_inbox',
+      'Clean up inbox',
+      'Process the inbox: optionally assign unassigned inbox tasks a default project, then run OmniFocus cleanup to file them. Returns {inboxBefore, assigned, inboxAfter}.',
+      UPDATE,
+      {
+        container: z
+          .string()
+          .optional()
+          .describe('Project ID or name to assign unassigned inbox tasks to before cleanup'),
+      },
+      async ({ container }) => jsonResponse(await of.cleanupInbox({ container }))
     ),
     def(
       'list_projects',
@@ -323,6 +383,10 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .describe('Sequential project (tasks must be done in order)'),
         tags: z.array(z.string()).optional().describe('Tags to assign'),
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('Initial status'),
+        reviewInterval: z
+          .string()
+          .optional()
+          .describe('Review interval, e.g. "1 week" or "2 months"'),
       },
       async (options) => jsonResponse(await of.createProject(options))
     ),
@@ -339,8 +403,49 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         sequential: z.boolean().optional().describe('Set sequential/parallel'),
         tags: z.array(z.string()).optional().describe('Replace tags'),
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('New status'),
+        reviewInterval: z
+          .string()
+          .optional()
+          .describe('Review interval, e.g. "1 week" or "2 months"'),
       },
       async ({ idOrName, ...options }) => jsonResponse(await of.updateProject(idOrName, options))
+    ),
+    def(
+      'complete_project',
+      'Complete project',
+      'Mark a project complete (or incomplete). Uses markComplete, which correctly handles repeating projects.',
+      UPDATE,
+      {
+        idOrName: z.string().describe('Project ID or name'),
+        date: z.string().optional().describe('Completion date (ISO 8601, defaults to now)'),
+        incomplete: z.boolean().optional().describe('Mark the project incomplete instead'),
+      },
+      async ({ idOrName, date, incomplete }) =>
+        jsonResponse(await of.completeProject(idOrName, { date, incomplete }))
+    ),
+    def(
+      'list_projects_due_for_review',
+      'List projects due for review',
+      'List projects whose next review date has passed (headless; excludes dropped and completed projects)',
+      READ,
+      {},
+      async () => jsonResponse(await of.listProjectsDueForReview())
+    ),
+    def(
+      'mark_project_reviewed',
+      'Mark project reviewed',
+      'Mark a project as reviewed now; OmniFocus reschedules its next review from the review interval',
+      UPDATE,
+      { idOrName: z.string().describe('Project ID or name') },
+      async ({ idOrName }) => jsonResponse(await of.markProjectReviewed(idOrName))
+    ),
+    def(
+      'search_projects',
+      'Search projects',
+      'Fuzzy-search projects using OmniFocus Quick Open matching',
+      READ,
+      { query: z.string().describe('Search query') },
+      async ({ query }) => jsonResponse(await of.searchProjects(query))
     ),
     def(
       'delete_project',
@@ -452,6 +557,14 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       jsonResponse(await of.getTagStats())
     ),
     def(
+      'search_tags',
+      'Search tags',
+      'Fuzzy-search tags using OmniFocus Quick Open matching',
+      READ,
+      { query: z.string().describe('Search query') },
+      async ({ query }) => jsonResponse(await of.searchTags(query))
+    ),
+    def(
       'list_folders',
       'List folders',
       'List all folders',
@@ -470,6 +583,73 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       },
       async ({ idOrName, includeDropped }) =>
         jsonResponse(await of.getFolder(idOrName, { includeDropped }))
+    ),
+    def(
+      'create_folder',
+      'Create folder',
+      'Create a new folder, optionally inside a parent folder',
+      CREATE,
+      {
+        name: z.string().describe('Folder name'),
+        parent: z.string().optional().describe('Parent folder ID or name'),
+      },
+      async (options) => jsonResponse(await of.createFolder(options))
+    ),
+    def(
+      'update_folder',
+      'Update folder',
+      'Update an existing folder: rename, set status, or move into another folder',
+      UPDATE,
+      {
+        idOrName: z.string().describe('Folder ID or name'),
+        name: z.string().optional().describe('New folder name'),
+        status: z.enum(['active', 'dropped']).optional().describe('New status'),
+        parent: z.string().optional().describe('Move into this parent folder'),
+      },
+      async ({ idOrName, ...options }) => jsonResponse(await of.updateFolder(idOrName, options))
+    ),
+    def(
+      'delete_folder',
+      'Delete folder',
+      'Delete a folder',
+      DELETE,
+      { idOrName: z.string().describe('Folder ID or name') },
+      async ({ idOrName }) => {
+        await of.deleteFolder(idOrName);
+        return jsonResponse({ deleted: true });
+      }
+    ),
+    def(
+      'search_folders',
+      'Search folders',
+      'Fuzzy-search folders using OmniFocus Quick Open matching',
+      READ,
+      { query: z.string().describe('Search query') },
+      async ({ query }) => jsonResponse(await of.searchFolders(query))
+    ),
+    def(
+      'undo',
+      'Undo last change',
+      'Undo the last change in the OmniFocus database. Errors when there is nothing to undo. Undo granularity is OmniFocus action grouping: one tool call is typically one undo group.',
+      UPDATE,
+      {},
+      async () => jsonResponse(await of.undo())
+    ),
+    def(
+      'redo',
+      'Redo last undone change',
+      'Redo the last undone change in the OmniFocus database. Errors when there is nothing to redo.',
+      UPDATE,
+      {},
+      async () => jsonResponse(await of.redo())
+    ),
+    def(
+      'sync_now',
+      'Sync now',
+      'Save the OmniFocus database, which triggers a sync when sync is enabled',
+      CREATE,
+      {},
+      async () => jsonResponse(await of.syncNow())
     ),
   ];
 
@@ -542,6 +722,8 @@ export const SERVER_INSTRUCTIONS = `CLI-backed MCP server for OmniFocus on macOS
 - Tag names may be hierarchical paths like "Parent/Child".
 - get_perspective_tasks requires an OmniFocus window to be open, may take up to 60 seconds, and switches the visible perspective as a side effect. Other tools are headless.
 - Failed calls return a JSON body {"error": {"name", "detail", "statusCode"}} with isError set; a 404 usually means the idOrName didn't match anything.
+- Prefer update_tasks over repeated update_task calls when changing several tasks: it runs in one round trip and returns per-id {id, ok, error?} results instead of failing the whole batch.
+- undo/redo revert whole tool calls (OmniFocus groups each script into one undo step) — a safety valve after a bad batch update.
 - Use search_tools (case-insensitive regex over tool names/descriptions) to discover capabilities.`;
 
 export async function runMcpServer() {
