@@ -214,6 +214,21 @@ describe('search_tools', () => {
     expect(matches.map((m) => m.name)).toContain('search_tools');
   });
 
+  it('surfaces app tools registered outside buildTools (get_stats_dashboard)', async () => {
+    // get_stats_dashboard is registered via registerApps, not buildTools, but
+    // it must still be discoverable through search_tools.
+    const tools = buildTools(makeMockOf().of);
+    const byName = (await callTool(tools, 'search_tools', {
+      query: 'get_stats_dashboard',
+    })) as { tools: Array<{ name: string; description: string }> };
+    expect(byName.tools.map((m) => m.name)).toContain('get_stats_dashboard');
+    // And by a description keyword, the way an agent would actually find it.
+    const byDesc = (await callTool(tools, 'search_tools', { query: 'dashboard' })) as {
+      tools: Array<{ name: string }>;
+    };
+    expect(byDesc.tools.map((m) => m.name)).toContain('get_stats_dashboard');
+  });
+
   it('matches by name', async () => {
     const tools = buildTools(makeMockOf().of);
     const { tools: matches } = (await callTool(tools, 'search_tools', { query: '^create_' })) as {
