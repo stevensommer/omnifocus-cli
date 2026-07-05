@@ -69,12 +69,26 @@ describe('inbox tools are headless', () => {
     expect(scripts[0]).not.toContain('Perspective');
   });
 
-  it('getInboxCount reads inbox.length without a window', async () => {
+  // The inbox global retains completed and dropped root items (verified on
+  // OmniFocus 4.8.12), so both inbox tools must filter them out to match the
+  // old Inbox-perspective behaviour and to agree with each other.
+  it('listInboxTasks skips completed and dropped items', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listInboxTasks();
+    expect(scripts[0]).toContain('if (task.completed) continue;');
+    expect(scripts[0]).toContain('if (!task.effectiveActive) continue;');
+  });
+
+  it('getInboxCount counts only active, incomplete items (not inbox.length)', async () => {
     const { of, scripts } = captureScript('{"count": 4}');
     const count = await of.getInboxCount();
     expect(count).toBe(4);
-    expect(scripts[0]).toContain('inbox.length');
     expect(scripts[0]).not.toContain('windows');
+    // Must apply the same filter as listInboxTasks so the two always agree.
+    expect(scripts[0]).toContain('if (task.completed) continue;');
+    expect(scripts[0]).toContain('if (!task.effectiveActive) continue;');
+    // A raw inbox.length would recount completed/dropped items.
+    expect(scripts[0]).not.toContain('inbox.length');
   });
 });
 
@@ -116,4 +130,46 @@ describe('executeJXA abort', () => {
     },
     10000
   );
+
+  // End-to-end confirmation that the abort path keys off Node's real
+  // AbortError. The mislabel case (a genuine failure that merely coincides
+  // with an aborted signal) is covered deterministically by the isAbortError
+  // unit test below, which asserts a nonzero-exit error does NOT read as a
+  // cancellation.
+  itDarwin(
+    'reports a cancellation when Node raises its abort error',
+    async () => {
+      const of = new OmniFocus();
+      const exec = (
+        of as unknown as {
+          executeJXA: (s: string, o?: { signal?: AbortSignal }) => Promise<string>;
+        }
+      ).executeJXA.bind(of);
+
+      // Pre-aborted signal: the child never spawns, so Node throws its
+      // AbortError — proving the abort path still works end-to-end.
+      const aborted = new AbortController();
+      aborted.abort();
+      await expect(exec('throw new Error("boom");', { signal: aborted.signal })).rejects.toThrow(
+        'Operation cancelled by client'
+      );
+    },
+    10000
+  );
+
+  // Unit-level guard for the classifier the catch block relies on.
+  it('isAbortError only matches Node abort errors, not arbitrary failures', () => {
+    const of = new OmniFocus();
+    const isAbort = (of as unknown as { isAbortError: (e: unknown) => boolean }).isAbortError.bind(
+      of
+    );
+
+    expect(isAbort({ name: 'AbortError' })).toBe(true);
+    expect(isAbort({ code: 'ABORT_ERR' })).toBe(true);
+    // A real osascript failure (nonzero exit) must NOT read as a cancellation.
+    expect(isAbort({ name: 'Error', code: 3 })).toBe(false);
+    expect(isAbort(new Error('OmniFocus: Task not found'))).toBe(false);
+    expect(isAbort(null)).toBe(false);
+    expect(isAbort('string error')).toBe(false);
+  });
 });

@@ -268,7 +268,11 @@ export class OmniFocus {
 
       return stdout.trim();
     } catch (error) {
-      if (signal?.aborted) {
+      // Only treat this as a cancellation when Node's aborted-child error is
+      // what actually surfaced (name === 'AbortError' / code === 'ABORT_ERR').
+      // Checking signal.aborted alone would mislabel a genuine osascript
+      // failure that merely coincided with an abort, masking the real error.
+      if (this.isAbortError(error)) {
         throw new OmniFocusCliError('Operation cancelled by client', 499);
       }
       throw error;
@@ -279,6 +283,16 @@ export class OmniFocus {
         /* ignore cleanup errors */
       }
     }
+  }
+
+  // Node reports an aborted execFile child with name 'AbortError' and code
+  // 'ABORT_ERR' (verified on the Node runtime the CLI ships against). Match on
+  // those rather than the ambient signal state so a real failure is never
+  // reclassified as a cancellation.
+  private isAbortError(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null) return false;
+    const err = error as { name?: unknown; code?: unknown };
+    return err.name === 'AbortError' || err.code === 'ABORT_ERR';
   }
 
   private escapeString(str: string): string {
@@ -585,12 +599,22 @@ export class OmniFocus {
   // Inbox tools use the headless `inbox` global (root inbox items) rather
   // than traversing the Inbox perspective, which needed an open OmniFocus
   // window and paid a perspective-switch delay.
+  //
+  // The `inbox` global retains completed and dropped root items (verified on
+  // OmniFocus 4.8.12), whereas the old Inbox-perspective count only surfaced
+  // active, incomplete ones. Both tools therefore apply the same filter the
+  // rest of the codebase uses so the list and the count always agree: skip
+  // completed tasks (task.completed) and dropped tasks (!task.effectiveActive).
+  // Note effectiveActive is true for completed tasks, so both checks are
+  // required — !effectiveActive alone would still count completed items.
   async listInboxTasks(): Promise<Task[]> {
     const omniScript = `
       ${this.OMNI_HELPERS}
       (() => {
         const results = [];
         for (const task of inbox) {
+          if (task.completed) continue;
+          if (!task.effectiveActive) continue;
           results.push(serializeTask(task));
         }
         return JSON.stringify(results);
@@ -603,7 +627,15 @@ export class OmniFocus {
 
   async getInboxCount(): Promise<number> {
     const omniScript = `
-      (() => JSON.stringify({ count: inbox.length }))();
+      (() => {
+        let count = 0;
+        for (const task of inbox) {
+          if (task.completed) continue;
+          if (!task.effectiveActive) continue;
+          count++;
+        }
+        return JSON.stringify({ count });
+      })();
     `;
 
     const output = await this.executeJXA(this.wrapOmniScript(omniScript));
