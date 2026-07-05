@@ -841,4 +841,26 @@ describe('executeJXA abort', () => {
     expect(isAbort(null)).toBe(false);
     expect(isAbort('string error')).toBe(false);
   });
+
+  // Regression for get_stats_dashboard firing 3 executeJXA calls concurrently
+  // via Promise.all: the old Date.now()-based temp filename let two calls
+  // land in the same millisecond, race on the same file, and corrupt each
+  // other's script into a random SyntaxError. Each call now gets its own
+  // script that returns a distinct value; if filenames collided, at least
+  // one call would read back the wrong script's output or throw.
+  itDarwin(
+    'gives concurrent calls distinct temp files instead of colliding',
+    async () => {
+      const of = new OmniFocus();
+      const exec = (
+        of as unknown as { executeJXA: (s: string) => Promise<string> }
+      ).executeJXA.bind(of);
+
+      const results = await Promise.all(
+        Array.from({ length: 20 }, (_, i) => exec(`(() => JSON.stringify({n: ${i}}))();`))
+      );
+      expect(results.map((r) => JSON.parse(r).n)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+    },
+    10000
+  );
 });
