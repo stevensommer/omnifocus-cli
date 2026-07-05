@@ -14,13 +14,35 @@ import { OmniFocus } from '../lib/omnifocus.js';
  * `search_tools` searches over, so the searchable catalogue can never drift
  * from the registered catalogue.
  */
+/**
+ * Structural subset of the SDK's RequestHandlerExtra that handlers use:
+ * enough for cancellation and progress without importing the SDK's generic
+ * types into every test.
+ */
+export interface ToolCallExtra {
+  signal?: AbortSignal;
+  _meta?: { progressToken?: string | number };
+  sendNotification?: (notification: {
+    method: 'notifications/progress';
+    params: {
+      progressToken: string | number;
+      progress: number;
+      total?: number;
+      message?: string;
+    };
+  }) => Promise<void>;
+}
+
 export interface ToolSpec {
   name: string;
   title: string;
   description: string;
   annotations: ToolAnnotations;
   schema: ZodRawShape;
-  handler: (args: Record<string, unknown>) => CallToolResult | Promise<CallToolResult>;
+  handler: (
+    args: Record<string, unknown>,
+    extra?: ToolCallExtra
+  ) => CallToolResult | Promise<CallToolResult>;
 }
 
 /**
@@ -62,6 +84,35 @@ function jsonResponse(data: unknown): CallToolResult {
 }
 
 /**
+ * Send periodic notifications/progress while a slow tool call runs, so
+ * clients that attach a progressToken (Claude Code does; Claude Desktop
+ * doesn't yet) can show liveness and reset idle timeouts. No token or no
+ * notification channel → no-op. Returns a stop function for finally blocks.
+ */
+export function startProgressHeartbeat(
+  extra: ToolCallExtra | undefined,
+  message: string,
+  intervalMs = 5000
+): () => void {
+  const progressToken = extra?._meta?.progressToken;
+  const send = extra?.sendNotification;
+  if (progressToken === undefined || !send) return () => {};
+
+  let progress = 0;
+  const tick = () => {
+    progress += 1;
+    // Progress failures must never break the tool call itself.
+    send({
+      method: 'notifications/progress',
+      params: { progressToken, progress, message },
+    }).catch(() => {});
+  };
+  tick();
+  const interval = setInterval(tick, intervalMs);
+  return () => clearInterval(interval);
+}
+
+/**
  * Define a tool while preserving per-tool argument inference: the `handler`
  * sees arguments typed from its own `schema`, even though the returned specs
  * are collected into a single heterogeneous array.
@@ -72,16 +123,19 @@ function def<S extends ZodRawShape>(
   description: string,
   annotations: ToolAnnotations,
   schema: S,
-  handler: (args: z.infer<z.ZodObject<S>>) => CallToolResult | Promise<CallToolResult>
+  handler: (
+    args: z.infer<z.ZodObject<S>>,
+    extra?: ToolCallExtra
+  ) => CallToolResult | Promise<CallToolResult>
 ): ToolSpec {
   // Operational failures become isError tool results (per SEP-1303) carrying
   // the same structured error JSON as the CLI, so the calling model can read
   // the failure and self-correct. McpError is re-thrown untouched: it is the
   // SDK's protocol-level signal (e.g. elicitation-required) and the SDK's own
   // dispatcher special-cases it — wrapping it here would break that path.
-  const safeHandler: ToolSpec['handler'] = async (args) => {
+  const safeHandler: ToolSpec['handler'] = async (args, extra) => {
     try {
-      return await handler(args as z.infer<z.ZodObject<S>>);
+      return await handler(args as z.infer<z.ZodObject<S>>, extra);
     } catch (error) {
       if (error instanceof McpError) throw error;
       return {
@@ -279,7 +333,19 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       {
         name: z.string().describe('Perspective name (e.g., Inbox, Flagged, or custom perspective)'),
       },
-      async ({ name }) => jsonResponse(await of.getPerspectiveTasks(name))
+      async ({ name }, extra) => {
+        // Perspective traversal can run up to 60s: emit progress heartbeats
+        // (when the client sent a token) and abort osascript on cancellation.
+        const stopHeartbeat = startProgressHeartbeat(
+          extra,
+          `Reading perspective "${name}" in OmniFocus`
+        );
+        try {
+          return jsonResponse(await of.getPerspectiveTasks(name, { signal: extra?.signal }));
+        } finally {
+          stopHeartbeat();
+        }
+      }
     ),
     def(
       'list_tags',
