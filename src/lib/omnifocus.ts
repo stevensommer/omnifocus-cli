@@ -167,19 +167,12 @@ export class OmniFocus {
       throw new Error("Task not found: " + idOrName);
     }
 
-    // Shared tail for the find* helpers: when exact matching failed, consult
-    // OmniFocus's own Quick Open fuzzy matcher. A single fuzzy hit is
-    // unambiguous and returned; multiple hits stay an error, but name the
-    // candidates so the caller can retry with the right one.
-    function resolveFuzzy(fuzzyMatches, typeName, idOrName, nameFn) {
-      if (fuzzyMatches.length === 1) return fuzzyMatches[0];
-      if (fuzzyMatches.length > 1) {
-        const names = fuzzyMatches.slice(0, 5).map(nameFn);
-        throw new Error(typeName + " not found: " + idOrName + ". Close matches: " + names.join(", "));
-      }
-      throw new Error(typeName + " not found: " + idOrName);
-    }
-
+    // find* helpers are exact-match only (id or exact name): every call site
+    // is a mutating/destructive path (update, delete, move-into, inbox-file),
+    // so a wrong guess is not a wrong read but a wrong write. Fuzzy Quick Open
+    // matching is deliberately NOT offered here — it lives only in the
+    // dedicated search_projects/search_tags/search_folders tools, where a
+    // guess just returns candidates for the caller to look at, not act on.
     function findProject(idOrName) {
       const byId = Project.byIdentifier(idOrName);
       if (byId) return byId;
@@ -188,7 +181,7 @@ export class OmniFocus {
           return project;
         }
       }
-      return resolveFuzzy(projectsMatching(idOrName), "Project", idOrName, p => p.name);
+      throw new Error("Project not found: " + idOrName);
     }
 
     function findFolder(idOrName) {
@@ -199,7 +192,7 @@ export class OmniFocus {
           return folder;
         }
       }
-      return resolveFuzzy(foldersMatching(idOrName), "Folder", idOrName, f => f.name);
+      throw new Error("Folder not found: " + idOrName);
     }
 
     function getTagPath(tag) {
@@ -228,7 +221,7 @@ export class OmniFocus {
       const matches = flattenedTags.filter(tag => tag.name === idOrName);
 
       if (matches.length === 0) {
-        return resolveFuzzy(tagsMatching(idOrName), "Tag", idOrName, getTagPath);
+        throw new Error("Tag not found: " + idOrName);
       }
 
       if (matches.length > 1) {
@@ -423,12 +416,31 @@ export class OmniFocus {
     `.trim();
   }
 
+  // YYYY-MM-DD, optionally with a time component (space or "T" separated,
+  // optional seconds/fraction, optional "Z" or +HH:mm offset) — the two
+  // formats CLAUDE.md documents as accepted input. Deliberately stricter
+  // than "anything new Date() can parse": bare `new Date(...)` also accepts
+  // ambiguous strings like "Jan 5" or "2024" and silently resolves them to
+  // some other date, rather than throwing — confirmed live (via updateTasks
+  // with due: "Jan 5", which set the task's due date to 2000-01-04 with no
+  // error at all). Requiring this shape turns that silent corruption into a
+  // clean 400 instead.
+  private static readonly ISO_DATE_RE =
+    /^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
   /**
-   * Validate an ISO 8601 filter value and return it normalised for embedding
-   * in the generated script. Rejecting here gives a clean 400 instead of a
-   * baffling empty result from an Invalid Date comparison inside OmniFocus.
+   * Validate an ISO 8601 date/filter value and return it normalised for
+   * embedding in the generated script. Rejecting here gives a clean 400
+   * instead of a baffling empty result (or, for ambiguous input, a silently
+   * wrong date) from a loose Date parse inside OmniFocus.
    */
   private isoDateArg(value: string, filterName: string): string {
+    if (!OmniFocus.ISO_DATE_RE.test(value)) {
+      throw new OmniFocusCliError(
+        `Invalid ${filterName} date: "${value}" (expected ISO 8601, e.g. "2024-01-15" or "2024-01-15T10:00:00")`,
+        400
+      );
+    }
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) {
       throw new OmniFocusCliError(
@@ -565,21 +577,21 @@ export class OmniFocus {
     if (options.defer !== undefined) {
       updates.push(
         options.defer
-          ? `task.deferDate = new Date(${JSON.stringify(options.defer)});`
+          ? `task.deferDate = new Date(${JSON.stringify(this.isoDateArg(options.defer, 'defer'))});`
           : 'task.deferDate = null;'
       );
     }
     if (options.due !== undefined) {
       updates.push(
         options.due
-          ? `task.dueDate = new Date(${JSON.stringify(options.due)});`
+          ? `task.dueDate = new Date(${JSON.stringify(this.isoDateArg(options.due, 'due'))});`
           : 'task.dueDate = null;'
       );
     }
     if (options.planned !== undefined) {
       updates.push(
         options.planned
-          ? `task.plannedDate = new Date(${JSON.stringify(options.planned)});`
+          ? `task.plannedDate = new Date(${JSON.stringify(this.isoDateArg(options.planned, 'planned'))});`
           : 'task.plannedDate = null;'
       );
     }
@@ -603,7 +615,7 @@ export class OmniFocus {
       updates.push(`tag.name = "${this.escapeString(options.name)}";`);
     }
     if (options.status !== undefined) {
-      updates.push(`tag.status = stringToTagStatus("${options.status}");`);
+      updates.push(`tag.status = stringToTagStatus("${this.escapeString(options.status)}");`);
     }
 
     return updates.join('\n    ');
@@ -622,7 +634,9 @@ export class OmniFocus {
       updates.push(`project.sequential = ${options.sequential};`);
     }
     if (options.status !== undefined) {
-      updates.push(`project.status = stringToProjectStatus("${options.status}");`);
+      updates.push(
+        `project.status = stringToProjectStatus("${this.escapeString(options.status)}");`
+      );
     }
     if (options.folder !== undefined && options.folder) {
       updates.push(`
@@ -659,11 +673,27 @@ export class OmniFocus {
    * Project.ReviewInterval is a value object, not a proxy: mutate a copy and
    * assign it back (per the Omni Automation docs) — property writes on the
    * live value would silently do nothing.
+   *
+   * project.reviewInterval is documented as "Project.ReviewInterval or null"
+   * (a project with no review schedule configured), and there is no public
+   * constructor for the value object — `new Project.ReviewInterval()` throws
+   * "CallbackObject is not a constructor", and assigning a plain {steps,
+   * unit} literal is rejected with a type error, both confirmed live against
+   * OmniFocus 4.8.12. So when reviewInterval is null there is no way to
+   * build one from scratch; guard and fail with a clear, actionable message
+   * instead of letting `ri.steps = …` throw a bare "null is not an object"
+   * from deep inside the generated script.
    */
   private reviewIntervalCode(value: string): string {
     const { steps, unit } = this.parseReviewInterval(value);
     return `
         const ri = project.reviewInterval;
+        if (!ri) {
+          throw new Error(
+            "Project has no review interval configured; set one from the OmniFocus UI " +
+            "(Project Inspector > Review) before updating it via the CLI."
+          );
+        }
         ri.steps = ${steps};
         ri.unit = "${unit}";
         project.reviewInterval = ri;
@@ -788,7 +818,7 @@ export class OmniFocus {
 
         ${options.note ? `project.note = "${this.escapeString(options.note)}";` : ''}
         ${options.sequential !== undefined ? `project.sequential = ${options.sequential};` : ''}
-        ${options.status ? `project.status = stringToProjectStatus("${options.status}");` : ''}
+        ${options.status ? `project.status = stringToProjectStatus("${this.escapeString(options.status)}");` : ''}
         ${options.tags && options.tags.length > 0 ? `assignTags(project, ${JSON.stringify(options.tags)});` : ''}
         ${options.reviewInterval !== undefined ? this.reviewIntervalCode(options.reviewInterval) : ''}
 
@@ -1119,7 +1149,7 @@ export class OmniFocus {
             : `const tag = new Tag("${this.escapeString(options.name)}", tags.beginning);`
         }
 
-        ${options.status ? `tag.status = stringToTagStatus("${options.status}");` : ''}
+        ${options.status ? `tag.status = stringToTagStatus("${this.escapeString(options.status)}");` : ''}
 
         return JSON.stringify(serializeTag(tag));
       })();
@@ -1611,7 +1641,7 @@ export class OmniFocus {
       updates.push(`folder.name = "${this.escapeString(options.name)}";`);
     }
     if (options.status !== undefined) {
-      updates.push(`folder.status = stringToFolderStatus("${options.status}");`);
+      updates.push(`folder.status = stringToFolderStatus("${this.escapeString(options.status)}");`);
     }
     if (options.parent !== undefined && options.parent) {
       updates.push(`

@@ -310,7 +310,7 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'convert_task_to_project',
       'Convert task to project',
       'Convert a task into a new project (child tasks come along). The project lands in the given folder, or at the end of the library.',
-      CREATE,
+      UPDATE,
       {
         idOrName: z.string().describe('Task ID or name'),
         folder: z.string().optional().describe('Destination folder ID or name'),

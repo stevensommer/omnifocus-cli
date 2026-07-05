@@ -1,9 +1,11 @@
 import { Command } from 'commander';
 import { outputJson } from '../lib/output.js';
-import { withErrorHandling } from '../lib/command-utils.js';
+import { validateStatus, withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import { parseDateTime } from '../lib/dates.js';
 import type { ProjectFilters, UpdateProjectOptions } from '../types.js';
+
+const PROJECT_STATUSES = ['active', 'on hold', 'dropped'] as const;
 
 export function createProjectCommand(): Command {
   const command = new Command('project');
@@ -47,7 +49,7 @@ export function createProjectCommand(): Command {
           folder: options.folder,
           tags: options.tag,
           sequential: options.sequential,
-          status: options.status,
+          status: validateStatus(options.status, PROJECT_STATUSES),
           reviewInterval: options.reviewInterval,
         });
         outputJson(project);
@@ -75,7 +77,7 @@ export function createProjectCommand(): Command {
           ...(options.tag && { tags: options.tag }),
           ...(options.sequential && { sequential: true }),
           ...(options.parallel && { sequential: false }),
-          ...(options.status && { status: options.status }),
+          ...(options.status && { status: validateStatus(options.status, PROJECT_STATUSES) }),
           ...(options.reviewInterval && { reviewInterval: options.reviewInterval }),
         };
         const project = await of.updateProject(idOrName, updates);

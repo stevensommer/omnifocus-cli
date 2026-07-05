@@ -181,10 +181,19 @@ describe('buildTools catalogue', () => {
 
   it('annotates tools consistently with their naming convention', () => {
     // Verbs that mutate existing items (or rewind history) are destructive;
-    // undo/redo are matched exactly so a future undo_* read tool would fail
-    // this guard and force a deliberate decision here.
+    // undo/redo/convert_task_to_project are matched exactly rather than by
+    // prefix so a future undo_*/convert_*/other read-ish-sounding tool would
+    // fail this guard and force a deliberate decision here.
+    //
+    // convert_task_to_project doesn't match any destructive prefix (it reads
+    // as a "create" verb) but it destroys the original task in the process —
+    // the task's identity is irrevocably folded into the new project's root
+    // task (confirmed live: taskStatus, project self-reference, and object
+    // semantics all change; the id survives only because it becomes the
+    // project's root task id). It must be exact-matched here rather than
+    // left to default to non-destructive.
     const destructivePattern = /^(update_|delete_|drop_|complete_|mark_|cleanup_)/;
-    const destructiveExact = new Set(['undo', 'redo']);
+    const destructiveExact = new Set(['undo', 'redo', 'convert_task_to_project']);
     for (const t of buildTools(makeMockOf().of)) {
       const readOnly = /^(list_|get_|search_)/.test(t.name);
       expect(t.annotations.readOnlyHint, t.name).toBe(readOnly);

@@ -58,6 +58,47 @@ describe('updateTask script generation', () => {
     await of.updateTask('My Task', { project: 'House' });
     expect(scripts[0]).toContain('moveTasks([task], targetProject)');
   });
+
+  it('accepts ISO date/defer/due/planned values', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.updateTask('My Task', {
+      due: '2026-08-01',
+      defer: '2026-07-01T09:00:00',
+      planned: '2026-07-15',
+    });
+    expect(scripts[0]).toContain('task.dueDate = new Date(');
+    expect(scripts[0]).toContain('task.deferDate = new Date(');
+    expect(scripts[0]).toContain('task.plannedDate = new Date(');
+  });
+
+  it.each([
+    'due',
+    'defer',
+    'planned',
+  ] as const)('rejects an unparseable %s date with a 400 before touching OmniFocus', async (field) => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.updateTask('My Task', { [field]: 'not-a-date' })).rejects.toThrow(
+      `Invalid ${field} date`
+    );
+    expect(scripts).toHaveLength(0);
+  });
+
+  it.each([
+    'due',
+    'defer',
+    'planned',
+  ] as const)('rejects an ambiguous %s date (accepted by bare Date parsing, but not ISO) with a 400', async (field) => {
+    // Regression for the batch-update finding: new Date("Jan 5") does NOT
+    // throw, it silently resolves to some other year — confirmed live
+    // against OmniFocus 4.8.12 (updateTasks with due: "Jan 5" wrote
+    // 2000-01-04 with no error). Requiring the documented ISO shape
+    // (YYYY-MM-DD[THH:mm:ss]) turns that silent corruption into a 400.
+    const { of, scripts } = captureScript('{}');
+    await expect(of.updateTask('My Task', { [field]: 'Jan 5' })).rejects.toThrow(
+      `Invalid ${field} date`
+    );
+    expect(scripts).toHaveLength(0);
+  });
 });
 
 describe('listTasks filter generation', () => {
@@ -325,15 +366,26 @@ describe('fuzzy matching script generation', () => {
     expect(scripts[0]).toContain('foldersMatching(\\"wrk\\")');
   });
 
-  it('find helpers fall back to *Matching only for a single fuzzy hit', async () => {
+  it('find helpers are exact-match only: no *Matching fallback', async () => {
+    // SAFETY: find* is used exclusively by mutating/destructive paths
+    // (update, delete, move-into, inbox-file). Falling back to a fuzzy
+    // Quick Open match there would let a typo silently act on a guessed
+    // object — e.g. `of folder delete Wrk` deleting "Work" instead of
+    // erroring. Fuzzy matching must stay confined to the dedicated
+    // search_projects/search_tags/search_folders tools (asserted above),
+    // which only return candidates for a human to look at, never act on
+    // one automatically.
     const { of, scripts } = captureScript('{}');
     await of.getTask('abc');
-    // The helpers are shared, so any script carries the fallbacks.
-    expect(scripts[0]).toContain('projectsMatching(idOrName)');
-    expect(scripts[0]).toContain('tagsMatching(idOrName)');
-    expect(scripts[0]).toContain('foldersMatching(idOrName)');
-    expect(scripts[0]).toContain('if (fuzzyMatches.length === 1) return fuzzyMatches[0];');
-    expect(scripts[0]).toContain('Close matches');
+    expect(scripts[0]).not.toContain('projectsMatching(idOrName)');
+    expect(scripts[0]).not.toContain('tagsMatching(idOrName)');
+    expect(scripts[0]).not.toContain('foldersMatching(idOrName)');
+    expect(scripts[0]).not.toContain('resolveFuzzy');
+    expect(scripts[0]).not.toContain('Close matches');
+    expect(scripts[0]).toContain('function findProject(idOrName) {');
+    expect(scripts[0]).toContain('throw new Error(\\"Project not found: \\" + idOrName);');
+    expect(scripts[0]).toContain('throw new Error(\\"Folder not found: \\" + idOrName);');
+    expect(scripts[0]).toContain('throw new Error(\\"Tag not found: \\" + idOrName);');
   });
 });
 

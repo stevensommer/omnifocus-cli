@@ -1,8 +1,10 @@
 import { Command } from 'commander';
 import { outputJson } from '../lib/output.js';
-import { withErrorHandling } from '../lib/command-utils.js';
+import { validateStatus, withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import type { FolderFilters, UpdateFolderOptions } from '../types.js';
+
+const FOLDER_STATUSES = ['active', 'dropped'] as const;
 
 export function createFolderCommand(): Command {
   const command = new Command('folder');
@@ -57,7 +59,7 @@ export function createFolderCommand(): Command {
         const of = new OmniFocus();
         const updates: UpdateFolderOptions = {
           ...(options.name && { name: options.name }),
-          ...(options.status && { status: options.status }),
+          ...(options.status && { status: validateStatus(options.status, FOLDER_STATUSES) }),
           ...(options.parent && { parent: options.parent }),
         };
         const folder = await of.updateFolder(idOrName, updates);

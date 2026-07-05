@@ -34,6 +34,23 @@ export function parseStatusFilter(value: string): TaskStatusFilter {
   return value as TaskStatusFilter;
 }
 
+/**
+ * Reject a pair of opposite boolean flags (--complete/--incomplete,
+ * --flag/--unflag) when both are given: silently letting object-spread
+ * order pick a winner means the "loses" flag does something invisible to
+ * the caller. Called from the action handler so withErrorHandling turns
+ * this into a clean JSON 400.
+ */
+function rejectConflictingFlags(
+  pairs: Array<[boolean | undefined, boolean | undefined, string, string]>
+): void {
+  for (const [a, b, aName, bName] of pairs) {
+    if (a && b) {
+      throw new OmniFocusCliError(`Cannot combine ${aName} and ${bName}`, 400);
+    }
+  }
+}
+
 export function createTaskCommand(): Command {
   const command = new Command('task');
   command.description('Manage OmniFocus tasks');
@@ -134,6 +151,10 @@ export function createTaskCommand(): Command {
     .option('-e, --estimate <minutes>', 'Estimated time in minutes', parseInt)
     .action(
       withErrorHandling(async (idOrName, options) => {
+        rejectConflictingFlags([
+          [options.flag, options.unflag, '--flag', '--unflag'],
+          [options.complete, options.incomplete, '--complete', '--incomplete'],
+        ]);
         const of = new OmniFocus();
         const updates: UpdateTaskOptions = {
           ...(options.name && { name: options.name }),
@@ -184,6 +205,10 @@ export function createTaskCommand(): Command {
     .option('--shift-planned <days>', 'Shift planned dates by N days', parseInt)
     .action(
       withErrorHandling(async (idOrNames, options) => {
+        rejectConflictingFlags([
+          [options.flag, options.unflag, '--flag', '--unflag'],
+          [options.complete, options.incomplete, '--complete', '--incomplete'],
+        ]);
         const of = new OmniFocus();
         const updates: UpdateTasksOptions = {
           ...(options.name && { name: options.name }),
