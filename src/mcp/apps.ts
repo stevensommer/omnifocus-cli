@@ -34,9 +34,13 @@ export interface AppToolDescriptor {
 const GET_STATS_DASHBOARD_DESCRIPTION =
   'Get combined task, project, and tag statistics in one call. In MCP Apps hosts this renders an interactive dashboard; elsewhere it returns the combined JSON.';
 
+const TRIAGE_TASKS_DESCRIPTION =
+  'List tasks for triage by filter (inbox, actionable, flagged, or search). In MCP Apps hosts this renders an interactive triage list whose row actions (complete, flag, defer) call update_task; elsewhere it returns the task list JSON.';
+
 /** The single source of truth for app tools search_tools should also match. */
 export const APP_TOOL_DESCRIPTORS: readonly AppToolDescriptor[] = [
   { name: 'get_stats_dashboard', description: GET_STATS_DASHBOARD_DESCRIPTION },
+  { name: 'triage_tasks', description: TRIAGE_TASKS_DESCRIPTION },
 ];
 
 /**
@@ -142,8 +146,7 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
     'triage_tasks',
     {
       title: 'Triage tasks',
-      description:
-        'List tasks for triage by filter (inbox, actionable, flagged, or search). In MCP Apps hosts this renders an interactive triage list whose row actions (complete, flag, defer) call update_task; elsewhere it returns the task list JSON.',
+      description: TRIAGE_TASKS_DESCRIPTION,
       inputSchema: {
         filter: z
           .enum(['inbox', 'actionable', 'flagged', 'search'])
