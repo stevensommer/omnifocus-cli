@@ -3,7 +3,31 @@ import { outputJson } from '../lib/output.js';
 import { withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import { parseDateTime } from '../lib/dates.js';
-import type { TaskFilters, UpdateTaskOptions } from '../types.js';
+import { OmniFocusCliError } from '../lib/errors.js';
+import type { TaskFilters, TaskStatusFilter, UpdateTaskOptions } from '../types.js';
+
+const TASK_STATUS_FILTERS: TaskStatusFilter[] = [
+  'actionable',
+  'available',
+  'next',
+  'blocked',
+  'dueSoon',
+  'overdue',
+  'completed',
+  'dropped',
+];
+
+export function parseStatusFilter(value: string): TaskStatusFilter {
+  if (!(TASK_STATUS_FILTERS as string[]).includes(value)) {
+    // Throw the structured 400 (matching isoDateArg's invalid-date handling)
+    // so a bad --status is classified as client error, not a generic 500.
+    throw new OmniFocusCliError(
+      `Invalid status "${value}". Valid: ${TASK_STATUS_FILTERS.join(', ')}`,
+      400
+    );
+  }
+  return value as TaskStatusFilter;
+}
 
 export function createTaskCommand(): Command {
   const command = new Command('task');
@@ -17,6 +41,21 @@ export function createTaskCommand(): Command {
     .option('-p, --project <name>', 'Filter by project')
     .option('-t, --tag <name>', 'Filter by tag')
     .option('-c, --completed', 'Include completed tasks')
+    .option(
+      '-s, --status <status>',
+      `Filter by status (${TASK_STATUS_FILTERS.join('|')})`,
+      parseStatusFilter
+    )
+    .option('--due-before <date>', 'Effective due date before (ISO 8601)')
+    .option('--due-after <date>', 'Effective due date after (ISO 8601)')
+    .option('--defer-before <date>', 'Effective defer date before (ISO 8601)')
+    .option('--defer-after <date>', 'Effective defer date after (ISO 8601)')
+    .option('--planned-before <date>', 'Planned date before (ISO 8601)')
+    .option('--planned-after <date>', 'Planned date after (ISO 8601)')
+    .option('--completed-before <date>', 'Completed before (ISO 8601; implies --completed)')
+    .option('--completed-after <date>', 'Completed after (ISO 8601; implies --completed)')
+    .option('--added-before <date>', 'Added before (ISO 8601)')
+    .option('--added-after <date>', 'Added after (ISO 8601)')
     .action(
       withErrorHandling(async (options) => {
         const of = new OmniFocus();
@@ -25,6 +64,19 @@ export function createTaskCommand(): Command {
           ...(options.flagged && { flagged: true }),
           ...(options.project && { project: options.project }),
           ...(options.tag && { tag: options.tag }),
+          ...(options.status && { status: options.status }),
+          ...(options.dueBefore && { dueBefore: parseDateTime(options.dueBefore) }),
+          ...(options.dueAfter && { dueAfter: parseDateTime(options.dueAfter) }),
+          ...(options.deferBefore && { deferBefore: parseDateTime(options.deferBefore) }),
+          ...(options.deferAfter && { deferAfter: parseDateTime(options.deferAfter) }),
+          ...(options.plannedBefore && { plannedBefore: parseDateTime(options.plannedBefore) }),
+          ...(options.plannedAfter && { plannedAfter: parseDateTime(options.plannedAfter) }),
+          ...(options.completedBefore && {
+            completedBefore: parseDateTime(options.completedBefore),
+          }),
+          ...(options.completedAfter && { completedAfter: parseDateTime(options.completedAfter) }),
+          ...(options.addedBefore && { addedBefore: parseDateTime(options.addedBefore) }),
+          ...(options.addedAfter && { addedAfter: parseDateTime(options.addedAfter) }),
         };
         const tasks = await of.listTasks(filters);
         outputJson(tasks);
@@ -99,6 +151,18 @@ export function createTaskCommand(): Command {
           ...(options.estimate !== undefined && { estimatedMinutes: options.estimate }),
         };
         const task = await of.updateTask(idOrName, updates);
+        outputJson(task);
+      })
+    );
+
+  command
+    .command('drop <idOrName>')
+    .description('Drop a task (abandon it, keeping history — unlike delete)')
+    .option('--all-occurrences', 'Also stop future repeats of a repeating task')
+    .action(
+      withErrorHandling(async (idOrName, options) => {
+        const of = new OmniFocus();
+        const task = await of.dropTask(idOrName, { allOccurrences: options.allOccurrences });
         outputJson(task);
       })
     );

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { classifyError, OmniFocusCliError } from '../errors.js';
+import { parseStatusFilter } from '../../commands/task.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdtemp, writeFile, rm } from 'fs/promises';
@@ -117,6 +118,29 @@ describe('classifyError', () => {
       detail: 'An unknown error occurred',
       statusCode: 500,
     });
+  });
+});
+
+describe('parseStatusFilter error consistency', () => {
+  it('rejects an invalid status with a 400 OmniFocusCliError (like isoDateArg)', () => {
+    let thrown: unknown;
+    try {
+      parseStatusFilter('bogus');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(OmniFocusCliError);
+    expect((thrown as OmniFocusCliError).statusCode).toBe(400);
+    // And it classifies as a client error, not a generic 500.
+    expect(classifyError(thrown)).toEqual({
+      name: 'cli_error',
+      detail: expect.stringContaining('Invalid status "bogus"'),
+      statusCode: 400,
+    });
+  });
+
+  it('returns valid statuses unchanged', () => {
+    expect(parseStatusFilter('completed')).toBe('completed');
   });
 });
 

@@ -1,3 +1,19 @@
+/**
+ * OmniFocus's own Task.Status values (lowercased). "actionable" is a
+ * filter-only pseudo-status matching available | next | dueSoon | overdue —
+ * i.e. everything that can be worked on right now.
+ */
+export type TaskStatus =
+  | 'available'
+  | 'next'
+  | 'blocked'
+  | 'dueSoon'
+  | 'overdue'
+  | 'completed'
+  | 'dropped';
+
+export type TaskStatusFilter = TaskStatus | 'actionable';
+
 export interface Task {
   id: string;
   name: string;
@@ -6,15 +22,21 @@ export interface Task {
   dropped: boolean;
   effectivelyActive: boolean;
   flagged: boolean;
+  effectiveFlagged: boolean;
+  taskStatus: TaskStatus;
   project: string | null;
   tags: string[];
   defer: string | null;
   due: string | null;
   planned: string | null;
+  effectiveDefer: string | null;
+  effectiveDue: string | null;
   estimatedMinutes: number | null;
   completionDate: string | null;
+  dropDate: string | null;
   added: string | null;
   modified: string | null;
+  url: string;
 }
 
 export interface Project {
@@ -24,9 +46,19 @@ export interface Project {
   status: 'active' | 'on hold' | 'dropped' | 'done';
   folder: string | null;
   sequential: boolean;
+  flagged: boolean;
+  defer: string | null;
+  due: string | null;
+  completionDate: string | null;
+  dropDate: string | null;
+  estimatedMinutes: number | null;
+  completedByChildren: boolean;
+  containsSingletonActions: boolean;
+  nextTask: { id: string; name: string } | null;
   taskCount: number;
   remainingCount: number;
   tags: string[];
+  url: string;
 }
 
 export interface TaskFilters {
@@ -35,6 +67,22 @@ export interface TaskFilters {
   flagged?: boolean;
   project?: string;
   tag?: string;
+  /** Match OmniFocus task status; "actionable" = available|next|dueSoon|overdue. */
+  status?: TaskStatusFilter;
+  // Date windows (ISO 8601). Due/defer compare against the task's
+  // *effective* dates so container-inherited dates count; completed/added
+  // compare the task's own timestamps. Setting a completed* window implies
+  // includeCompleted.
+  dueBefore?: string;
+  dueAfter?: string;
+  deferBefore?: string;
+  deferAfter?: string;
+  plannedBefore?: string;
+  plannedAfter?: string;
+  completedBefore?: string;
+  completedAfter?: string;
+  addedBefore?: string;
+  addedAfter?: string;
 }
 
 export interface ProjectFilters {
@@ -104,6 +152,7 @@ export interface Tag {
   parent: string | null;
   children: string[];
   allowsNextAction: boolean;
+  url: string;
 }
 
 export interface Folder {
@@ -116,6 +165,7 @@ export interface Folder {
   remainingProjectCount: number;
   folderCount: number;
   children: Folder[];
+  url: string;
 }
 
 export interface FolderFilters {

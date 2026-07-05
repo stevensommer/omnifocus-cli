@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Command, CommanderError } from 'commander';
+import { handleError } from './lib/errors.js';
 import { setOutputOptions } from './lib/output.js';
 import { createTaskCommand } from './commands/task.js';
 import { createProjectCommand } from './commands/project.js';
@@ -36,9 +37,22 @@ program.addCommand(createFolderCommand());
 program.addCommand(createMcpCommand());
 
 program.parseAsync().catch((err) => {
-  // Set exitCode instead of calling process.exit() so any queued stdout
-  // writes finish before the process terminates. See errors.ts for details.
-  // CommanderError covers --help, --version, and parse errors; commander has
-  // already written the relevant output, so just propagate the exit code.
-  process.exitCode = err instanceof CommanderError ? err.exitCode : 1;
+  if (err instanceof CommanderError) {
+    // Covers --help, --version, and Commander's own parse errors (unknown
+    // option, missing argument, etc.) — commander has already written the
+    // relevant output, so just propagate the exit code. Set exitCode instead
+    // of calling process.exit() so any queued stdout writes finish before the
+    // process terminates. See errors.ts for details.
+    process.exitCode = err.exitCode;
+    return;
+  }
+  // A custom option parser (e.g. a `--status` validator) can throw a plain
+  // Error/OmniFocusCliError. Commander's _callParseArg only wraps errors
+  // carrying a `commander.invalidArgument` code into a CommanderError; any
+  // other thrown value propagates out of parseAsync() completely unhandled,
+  // before an action's withErrorHandling ever runs. Without this branch that
+  // silently produced `exit 1` with no output on either stream. Route it
+  // through the same handleError as every other command failure so it prints
+  // the usual {"error": {...}} JSON body.
+  handleError(err);
 });

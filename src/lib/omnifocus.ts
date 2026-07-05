@@ -35,6 +35,53 @@ export class OmniFocus {
   } as const;
 
   private readonly OMNI_HELPERS = `
+    function isoOrNull(date) {
+      return date ? date.toISOString() : null;
+    }
+
+    // Preserve a genuine 0 (e.g. an explicit 0-minute estimate) instead of
+    // coercing it to null the way \`value || null\` would. OmniFocus emits a
+    // real number 0 when estimatedMinutes is set to 0, and null when unset
+    // (verified on OmniFocus 4.8.12), so only null/undefined should map to null.
+    function numberOrNull(value) {
+      return value != null ? value : null;
+    }
+
+    // Permalink for any database object. DatabaseObject.url exists from
+    // OmniFocus 4.5 but returns null for unsaved objects, so fall back to
+    // the documented omnifocus:///<kind>/<primaryKey> template.
+    function objectUrl(obj, kind) {
+      if (obj.url) return obj.url.string || String(obj.url);
+      return 'omnifocus:///' + kind + '/' + obj.id.primaryKey;
+    }
+
+    function taskStatusToString(status) {
+      if (status === Task.Status.Available) return 'available';
+      if (status === Task.Status.Next) return 'next';
+      if (status === Task.Status.Blocked) return 'blocked';
+      if (status === Task.Status.DueSoon) return 'dueSoon';
+      if (status === Task.Status.Overdue) return 'overdue';
+      if (status === Task.Status.Completed) return 'completed';
+      if (status === Task.Status.Dropped) return 'dropped';
+      return 'available';
+    }
+
+    function stringToTaskStatus(str) {
+      if (str === 'available') return Task.Status.Available;
+      if (str === 'next') return Task.Status.Next;
+      if (str === 'blocked') return Task.Status.Blocked;
+      if (str === 'dueSoon') return Task.Status.DueSoon;
+      if (str === 'overdue') return Task.Status.Overdue;
+      if (str === 'completed') return Task.Status.Completed;
+      if (str === 'dropped') return Task.Status.Dropped;
+      throw new Error('Unknown task status: ' + str);
+    }
+
+    function isActionableStatus(status) {
+      return status === Task.Status.Available || status === Task.Status.Next ||
+             status === Task.Status.DueSoon || status === Task.Status.Overdue;
+    }
+
     function serializeTask(task) {
       const containingProject = task.containingProject;
       const tagNames = task.tags.map(t => t.name);
@@ -44,18 +91,26 @@ export class OmniFocus {
         name: task.name,
         note: task.note || null,
         completed: task.completed,
-        dropped: task.dropped,
+        // Task has no .dropped property in Omni Automation (it serialized as
+        // undefined and vanished from the JSON); own-droppedness is dropDate.
+        dropped: task.dropDate !== null,
         effectivelyActive: task.effectiveActive,
         flagged: task.flagged,
+        effectiveFlagged: task.effectiveFlagged,
+        taskStatus: taskStatusToString(task.taskStatus),
         project: containingProject ? containingProject.name : null,
         tags: tagNames,
-        defer: task.deferDate ? task.deferDate.toISOString() : null,
-        due: task.dueDate ? task.dueDate.toISOString() : null,
-        planned: task.plannedDate ? task.plannedDate.toISOString() : null,
-        estimatedMinutes: task.estimatedMinutes || null,
-        completionDate: task.completionDate ? task.completionDate.toISOString() : null,
-        added: task.added ? task.added.toISOString() : null,
-        modified: task.modified ? task.modified.toISOString() : null
+        defer: isoOrNull(task.deferDate),
+        due: isoOrNull(task.dueDate),
+        planned: isoOrNull(task.plannedDate),
+        effectiveDefer: isoOrNull(task.effectiveDeferDate),
+        effectiveDue: isoOrNull(task.effectiveDueDate),
+        estimatedMinutes: numberOrNull(task.estimatedMinutes),
+        completionDate: isoOrNull(task.completionDate),
+        dropDate: isoOrNull(task.dropDate),
+        added: isoOrNull(task.added),
+        modified: isoOrNull(task.modified),
+        url: objectUrl(task, 'task')
       };
     }
 
@@ -64,6 +119,7 @@ export class OmniFocus {
       const allTasks = project.flattenedTasks;
       const remainingTasks = allTasks.filter(t => !t.completed);
       const tagNames = project.tags.map(t => t.name);
+      const nextTask = project.nextTask;
 
       return {
         id: project.id.primaryKey,
@@ -72,15 +128,27 @@ export class OmniFocus {
         status: projectStatusToString(project.status),
         folder: parentFolder ? parentFolder.name : null,
         sequential: project.sequential,
+        flagged: project.flagged,
+        defer: isoOrNull(project.deferDate),
+        due: isoOrNull(project.dueDate),
+        completionDate: isoOrNull(project.completionDate),
+        dropDate: isoOrNull(project.dropDate),
+        estimatedMinutes: numberOrNull(project.estimatedMinutes),
+        completedByChildren: project.completedByChildren,
+        containsSingletonActions: project.containsSingletonActions,
+        nextTask: nextTask ? { id: nextTask.id.primaryKey, name: nextTask.name } : null,
         taskCount: allTasks.length,
         remainingCount: remainingTasks.length,
-        tags: tagNames
+        tags: tagNames,
+        url: objectUrl(project, 'project')
       };
     }
 
     function findTask(idOrName) {
+      const byId = Task.byIdentifier(idOrName);
+      if (byId) return byId;
       for (const task of flattenedTasks) {
-        if (task.id.primaryKey === idOrName || task.name === idOrName) {
+        if (task.name === idOrName) {
           return task;
         }
       }
@@ -88,8 +156,10 @@ export class OmniFocus {
     }
 
     function findProject(idOrName) {
+      const byId = Project.byIdentifier(idOrName);
+      if (byId) return byId;
       for (const project of flattenedProjects) {
-        if (project.id.primaryKey === idOrName || project.name === idOrName) {
+        if (project.name === idOrName) {
           return project;
         }
       }
@@ -107,11 +177,8 @@ export class OmniFocus {
     }
 
     function findTag(idOrName) {
-      for (const tag of flattenedTags) {
-        if (tag.id.primaryKey === idOrName) {
-          return tag;
-        }
-      }
+      const byId = Tag.byIdentifier(idOrName);
+      if (byId) return byId;
 
       if (idOrName.includes('/')) {
         for (const tag of flattenedTags) {
@@ -195,7 +262,8 @@ export class OmniFocus {
         projectCount: folder.projects.length,
         remainingProjectCount: folder.projects.filter(p => p.effectiveActive).length,
         folderCount: folder.folders.length,
-        children: childFolders.map(child => serializeFolder(child, includeDropped))
+        children: childFolders.map(child => serializeFolder(child, includeDropped)),
+        url: objectUrl(folder, 'folder')
       };
     }
 
@@ -242,7 +310,8 @@ export class OmniFocus {
         status: tagStatusToString(tag.status),
         parent: tag.parent ? tag.parent.name : null,
         children: tag.children.map(c => c.name),
-        allowsNextAction: tag.allowsNextAction
+        allowsNextAction: tag.allowsNextAction,
+        url: objectUrl(tag, 'tag')
       };
     }
   `;
@@ -313,19 +382,85 @@ export class OmniFocus {
     `.trim();
   }
 
+  /**
+   * Validate an ISO 8601 filter value and return it normalised for embedding
+   * in the generated script. Rejecting here gives a clean 400 instead of a
+   * baffling empty result from an Invalid Date comparison inside OmniFocus.
+   */
+  private isoDateArg(value: string, filterName: string): string {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new OmniFocusCliError(
+        `Invalid ${filterName} date: "${value}" (expected ISO 8601)`,
+        400
+      );
+    }
+    return parsed.toISOString();
+  }
+
   private buildTaskFilters(filters: TaskFilters): string {
     const conditions: string[] = [];
 
-    if (!filters.includeCompleted) {
+    // Asking for completed/dropped tasks by status or completion window
+    // implies including them; otherwise those filters could never match.
+    const wantsCompleted =
+      filters.includeCompleted ||
+      filters.status === 'completed' ||
+      filters.completedBefore !== undefined ||
+      filters.completedAfter !== undefined;
+    const wantsDropped = filters.includeDropped || filters.status === 'dropped';
+
+    if (!wantsCompleted) {
       conditions.push('if (task.completed) continue;');
     }
-    if (!filters.includeDropped) {
+    // effectiveActive semantics on OmniFocus 4.x: it is TRUE for both active
+    // AND completed tasks (verified live on 4.8.12 — completed tasks pass this
+    // guard), and FALSE only for DROPPED tasks. So this guard is the *dropped*
+    // filter, not a completed filter. Completed tasks are excluded solely by
+    // the `task.completed` guard above. Do NOT "fix" completed-task filters by
+    // touching this line — dropping it would leak dropped tasks into every
+    // default listing, and completed filters already work because completed
+    // tasks satisfy effectiveActive === true.
+    if (!wantsDropped) {
       conditions.push('if (!task.effectiveActive) continue;');
     }
     if (filters.flagged) {
+      // Flagged means flagged — availability is the status filter's job.
+      // (Before status filters existed this also required Task.Status.Available.)
       conditions.push('if (!task.flagged) continue;');
-      conditions.push('if (task.taskStatus !== Task.Status.Available) continue;');
     }
+    if (filters.status) {
+      if (filters.status === 'actionable') {
+        conditions.push('if (!isActionableStatus(task.taskStatus)) continue;');
+      } else {
+        conditions.push(
+          `if (task.taskStatus !== stringToTaskStatus("${filters.status}")) continue;`
+        );
+      }
+    }
+
+    // Date windows. Due/defer use effective dates (inherited from the
+    // containing project/group); completed/added/planned are per-task.
+    const windows: Array<[string | undefined, string, string, '<' | '>']> = [
+      [filters.dueBefore, 'dueBefore', 'task.effectiveDueDate', '<'],
+      [filters.dueAfter, 'dueAfter', 'task.effectiveDueDate', '>'],
+      [filters.deferBefore, 'deferBefore', 'task.effectiveDeferDate', '<'],
+      [filters.deferAfter, 'deferAfter', 'task.effectiveDeferDate', '>'],
+      [filters.plannedBefore, 'plannedBefore', 'task.plannedDate', '<'],
+      [filters.plannedAfter, 'plannedAfter', 'task.plannedDate', '>'],
+      [filters.completedBefore, 'completedBefore', 'task.completionDate', '<'],
+      [filters.completedAfter, 'completedAfter', 'task.completionDate', '>'],
+      [filters.addedBefore, 'addedBefore', 'task.added', '<'],
+      [filters.addedAfter, 'addedAfter', 'task.added', '>'],
+    ];
+    for (const [value, filterName, dateExpr, op] of windows) {
+      if (value === undefined) continue;
+      const iso = this.isoDateArg(value, filterName);
+      conditions.push(
+        `{ const d = ${dateExpr}; if (!d || !(d ${op} new Date("${iso}"))) continue; }`
+      );
+    }
+
     if (filters.project) {
       conditions.push(`
         if (!task.containingProject || task.containingProject.name !== "${this.escapeString(filters.project)}") {
@@ -491,7 +626,7 @@ export class OmniFocus {
 
         ${options.note ? `task.note = "${this.escapeString(options.note)}";` : ''}
         ${options.flagged ? 'task.flagged = true;' : ''}
-        ${options.estimatedMinutes ? `task.estimatedMinutes = ${options.estimatedMinutes};` : ''}
+        ${options.estimatedMinutes != null ? `task.estimatedMinutes = ${options.estimatedMinutes};` : ''}
         ${options.defer ? `task.deferDate = new Date(${JSON.stringify(options.defer)});` : ''}
         ${options.due ? `task.dueDate = new Date(${JSON.stringify(options.due)});` : ''}
         ${options.planned ? `task.plannedDate = new Date(${JSON.stringify(options.planned)});` : ''}
@@ -528,6 +663,25 @@ export class OmniFocus {
     `;
 
     await this.executeJXA(this.wrapOmniScript(omniScript));
+  }
+
+  /**
+   * GTD-style drop: abandon the task while keeping its history (unlike
+   * deleteTask). allOccurrences=true also kills future repeats; false drops
+   * just this occurrence of a repeating task.
+   */
+  async dropTask(idOrName: string, opts: { allOccurrences?: boolean } = {}): Promise<Task> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const task = findTask("${this.escapeString(idOrName)}");
+        task.drop(${opts.allOccurrences === true});
+        return JSON.stringify(serializeTask(task));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
   }
 
   async listProjects(filters: ProjectFilters = {}): Promise<Project[]> {

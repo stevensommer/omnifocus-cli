@@ -60,6 +60,143 @@ describe('updateTask script generation', () => {
   });
 });
 
+describe('listTasks filter generation', () => {
+  it('status filter maps to stringToTaskStatus comparison', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ status: 'blocked' });
+    // The inner script is JSON-embedded by wrapOmniScript, so its double
+    // quotes appear escaped in the captured text.
+    expect(scripts[0]).toContain('stringToTaskStatus(\\"blocked\\")');
+  });
+
+  it('actionable pseudo-status uses isActionableStatus', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ status: 'actionable' });
+    expect(scripts[0]).toContain('isActionableStatus(task.taskStatus)');
+  });
+
+  it('flagged filter no longer conflates flagged with available', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ flagged: true });
+    expect(scripts[0]).toContain('if (!task.flagged) continue;');
+    expect(scripts[0]).not.toContain('Task.Status.Available) continue');
+  });
+
+  it('due windows compare effective due dates', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ dueBefore: '2026-08-01', dueAfter: '2026-07-01' });
+    expect(scripts[0]).toContain('task.effectiveDueDate');
+    expect(scripts[0]).toContain('2026-08-01');
+    expect(scripts[0]).toContain('2026-07-01');
+  });
+
+  it('completedAfter implies including completed tasks', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ completedAfter: '2026-07-01' });
+    expect(scripts[0]).not.toContain('if (task.completed) continue;');
+    expect(scripts[0]).toContain('task.completionDate');
+  });
+
+  it('status completed keeps completed tasks without leaking dropped ones', async () => {
+    // Regression for the false claim that completed filters "always return
+    // empty". On OmniFocus 4.x effectiveActive === true for completed tasks
+    // and false only for dropped (verified live on 4.8.12), so with
+    // status:'completed' the generated script must:
+    //   1. NOT drop completed tasks — the `if (task.completed) continue;` guard
+    //      is absent.
+    //   2. STILL retain the effectiveActive guard — completed tasks pass it
+    //      (effectiveActive === true), while dropped tasks are correctly kept
+    //      out. Removing this guard is the wrong "fix" and would leak dropped
+    //      tasks into a completed listing.
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ status: 'completed' });
+    expect(scripts[0]).not.toContain('if (task.completed) continue;');
+    expect(scripts[0]).toContain('if (!task.effectiveActive) continue;');
+  });
+
+  it('status dropped implies inclusion of dropped tasks', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks({ status: 'dropped' });
+    expect(scripts[0]).not.toContain('if (!task.effectiveActive) continue;');
+  });
+
+  it('rejects invalid ISO dates with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('[]');
+    await expect(of.listTasks({ dueBefore: 'not-a-date' })).rejects.toThrow(
+      'Invalid dueBefore date'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('serializer coverage', () => {
+  it('serializeTask includes status, effective dates, dropDate, and url', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks();
+    expect(scripts[0]).toContain('taskStatus: taskStatusToString(task.taskStatus)');
+    // task.dropped does not exist in Omni Automation — it must be derived.
+    expect(scripts[0]).toContain('dropped: task.dropDate !== null');
+    expect(scripts[0]).not.toContain('dropped: task.dropped');
+    expect(scripts[0]).toContain('effectiveDue: isoOrNull(task.effectiveDueDate)');
+    expect(scripts[0]).toContain('dropDate: isoOrNull(task.dropDate)');
+    expect(scripts[0]).toContain("url: objectUrl(task, 'task')");
+    // A genuine 0-minute estimate must survive serialisation. `x || null`
+    // would coerce 0 to null; numberOrNull only maps null/undefined to null.
+    expect(scripts[0]).toContain('estimatedMinutes: numberOrNull(task.estimatedMinutes)');
+    expect(scripts[0]).not.toContain('task.estimatedMinutes || null');
+  });
+
+  it('serializeProject includes dates, flagged, nextTask, and url', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.getProject('X');
+    expect(scripts[0]).toContain('flagged: project.flagged');
+    expect(scripts[0]).toContain('due: isoOrNull(project.dueDate)');
+    expect(scripts[0]).toContain('nextTask: nextTask ?');
+    expect(scripts[0]).toContain("url: objectUrl(project, 'project')");
+    expect(scripts[0]).toContain('estimatedMinutes: numberOrNull(project.estimatedMinutes)');
+    expect(scripts[0]).not.toContain('project.estimatedMinutes || null');
+  });
+
+  it('lookups try byIdentifier before scanning by name', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.getTask('abc');
+    expect(scripts[0]).toContain('Task.byIdentifier(idOrName)');
+    expect(scripts[0]).toContain('Project.byIdentifier(idOrName)');
+    expect(scripts[0]).toContain('Tag.byIdentifier(idOrName)');
+  });
+});
+
+describe('createTask script generation', () => {
+  it('emits an explicit 0-minute estimate instead of dropping it', async () => {
+    // `options.estimatedMinutes ? ...` would treat a real 0 as falsy and skip
+    // the assignment; the guard must be a null check so a deliberate 0 sticks.
+    const { of, scripts } = captureScript('{}');
+    await of.createTask({ name: 'Quick note', estimatedMinutes: 0 });
+    expect(scripts[0]).toContain('task.estimatedMinutes = 0;');
+  });
+
+  it('omits the estimate assignment when none is given', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.createTask({ name: 'No estimate' });
+    expect(scripts[0]).not.toContain('task.estimatedMinutes =');
+  });
+});
+
+describe('dropTask script generation', () => {
+  it('calls task.drop with allOccurrences and reserialises', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.dropTask('t1', { allOccurrences: true });
+    expect(scripts[0]).toContain('task.drop(true)');
+    expect(scripts[0]).toContain('serializeTask(task)');
+  });
+
+  it('defaults allOccurrences to false', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.dropTask('t1');
+    expect(scripts[0]).toContain('task.drop(false)');
+  });
+});
+
 describe('inbox tools are headless', () => {
   it('listInboxTasks iterates the inbox global instead of a window perspective', async () => {
     const { of, scripts } = captureScript('[]');
