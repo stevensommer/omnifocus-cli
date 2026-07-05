@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it } from 'vitest';
 import type { OmniFocus } from '../../lib/omnifocus.js';
-import { registerApps, STATS_DASHBOARD_URI } from '../apps.js';
+import { APP_TOOL_DESCRIPTORS, registerApps, STATS_DASHBOARD_URI } from '../apps.js';
 import { STATS_DASHBOARD_HTML } from '../apps/stats-dashboard.js';
 
 /**
@@ -125,6 +125,191 @@ describe('stats dashboard HTML template', () => {
   });
 });
 
+/**
+ * Behavioural harness for the inlined widget script. There is no DOM in the
+ * test environment (the suite runs under both vitest and bun's native runner,
+ * so it can't depend on jsdom or `vi`), so we run the IIFE against a minimal
+ * fake window/document. This is enough to exercise the postMessage JSON-RPC
+ * bridge: the source-origin guard, tool-result rendering, and theme handling —
+ * the parts a string assertion can't actually verify.
+ */
+interface FakeNode {
+  tagName: string;
+  className: string;
+  textContent: string;
+  attributes: Record<string, string>;
+  children: FakeNode[];
+  setAttribute(name: string, value: string): void;
+  getAttribute(name: string): string | null;
+  removeAttribute(name: string): void;
+  appendChild(child: FakeNode): FakeNode;
+  getBoundingClientRect(): { height: number };
+}
+
+function makeNode(tagName: string): FakeNode {
+  const node: FakeNode = {
+    tagName,
+    className: '',
+    textContent: '',
+    attributes: {},
+    children: [],
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return name in this.attributes ? this.attributes[name] : null;
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    getBoundingClientRect() {
+      return { height: 200 };
+    },
+  };
+  return node;
+}
+
+interface WidgetHarness {
+  postedToParent: Array<Record<string, unknown>>;
+  documentElement: FakeNode;
+  root: FakeNode;
+  /** Deliver a postMessage event to the widget's window listener. */
+  dispatch(data: unknown, source: unknown): void;
+  /** The window object the widget treats as its host frame. */
+  parentWindow: unknown;
+}
+
+/** Pull the inline <script> body out of the template. */
+function extractWidgetScript(): string {
+  const match = STATS_DASHBOARD_HTML.match(/<script>([\s\S]*?)<\/script>/);
+  if (!match) throw new Error('widget script block not found');
+  return match[1];
+}
+
+function runWidget(): WidgetHarness {
+  const postedToParent: Array<Record<string, unknown>> = [];
+  const documentElement = makeNode('html');
+  const root = makeNode('main');
+  let messageListener: ((event: { data: unknown; source: unknown }) => void) | undefined;
+
+  const parentWindow = {
+    postMessage(message: Record<string, unknown>) {
+      postedToParent.push(message);
+    },
+  };
+
+  const fakeDocument = {
+    documentElement,
+    getElementById: (id: string) => (id === 'root' ? root : null),
+    createElement: (tag: string) => makeNode(tag),
+    createElementNS: (_ns: string, tag: string) => makeNode(tag),
+  };
+
+  const fakeWindow: Record<string, unknown> = {
+    parent: parentWindow,
+    addEventListener(type: string, listener: (event: { data: unknown; source: unknown }) => void) {
+      if (type === 'message') messageListener = listener;
+    },
+  };
+
+  // Run the IIFE with our fakes shadowing the real globals.
+  const script = extractWidgetScript();
+  // eslint-disable-next-line no-new-func
+  new Function('window', 'document', 'Promise', script)(fakeWindow, fakeDocument, Promise);
+
+  return {
+    postedToParent,
+    documentElement,
+    root,
+    parentWindow,
+    dispatch(data, source) {
+      if (!messageListener) throw new Error('widget never registered a message listener');
+      messageListener({ data, source });
+    },
+  };
+}
+
+const okToolResult = {
+  structuredContent: {
+    tasks: { totalTasks: 5, overdueActiveTasks: 0 },
+    projects: {},
+    tags: {},
+  },
+};
+
+describe('stats dashboard postMessage bridge (behavioural)', () => {
+  it('ignores JSON-RPC messages that do not come from the host (window.parent)', () => {
+    const w = runWidget();
+    const postedBefore = w.postedToParent.length;
+    // A well-formed tool-result, but from a hostile frame that is not the parent.
+    w.dispatch(
+      { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: okToolResult },
+      { postMessage() {} }
+    );
+    // Nothing rendered, nothing sent back: the message was dropped.
+    expect(w.root.getAttribute('aria-busy')).toBe('true');
+    expect(w.postedToParent.length).toBe(postedBefore);
+  });
+
+  it('processes a tool-result that arrives from window.parent', () => {
+    const w = runWidget();
+    w.dispatch(
+      { jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: okToolResult },
+      w.parentWindow
+    );
+    // Data rendered (aria-busy cleared) and a size-changed notification sent.
+    expect(w.root.getAttribute('aria-busy')).toBe('false');
+    const methods = w.postedToParent.map((m) => m.method);
+    expect(methods).toContain('ui/notifications/size-changed');
+  });
+
+  it('answers a host ping only when it comes from the parent', () => {
+    const w = runWidget();
+    w.dispatch({ jsonrpc: '2.0', id: 99, method: 'ping' }, { postMessage() {} });
+    expect(w.postedToParent.some((m) => m.id === 99)).toBe(false);
+    w.dispatch({ jsonrpc: '2.0', id: 99, method: 'ping' }, w.parentWindow);
+    expect(w.postedToParent.some((m) => m.id === 99 && m.result !== undefined)).toBe(true);
+  });
+});
+
+describe('stats dashboard theme handling (behavioural)', () => {
+  it('sets data-theme when the host sends an explicit theme', () => {
+    const w = runWidget();
+    w.dispatch(
+      {
+        jsonrpc: '2.0',
+        method: 'ui/notifications/host-context-changed',
+        params: { theme: 'dark' },
+      },
+      w.parentWindow
+    );
+    expect(w.documentElement.getAttribute('data-theme')).toBe('dark');
+  });
+
+  it('clears data-theme when the host reverts to follow-system', () => {
+    const w = runWidget();
+    w.dispatch(
+      {
+        jsonrpc: '2.0',
+        method: 'ui/notifications/host-context-changed',
+        params: { theme: 'dark' },
+      },
+      w.parentWindow
+    );
+    expect(w.documentElement.getAttribute('data-theme')).toBe('dark');
+    // Host now sends a context with no explicit theme.
+    w.dispatch(
+      { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: {} },
+      w.parentWindow
+    );
+    expect(w.documentElement.getAttribute('data-theme')).toBe(null);
+  });
+});
+
 describe('get_stats_dashboard tool registration', () => {
   it('registers with a title, READ-style annotations, and the ui resource link', () => {
     const { server, tools } = makeStubServer();
@@ -143,6 +328,27 @@ describe('get_stats_dashboard tool registration', () => {
     expect(tool.config._meta?.ui).toMatchObject({ resourceUri: STATS_DASHBOARD_URI });
     // registerAppTool mirrors the URI into the legacy key for older hosts.
     expect(tool.config._meta?.['ui/resourceUri']).toBe(STATS_DASHBOARD_URI);
+  });
+});
+
+describe('APP_TOOL_DESCRIPTORS (search_tools discoverability)', () => {
+  it('lists get_stats_dashboard so search_tools can surface it', () => {
+    expect(APP_TOOL_DESCRIPTORS.map((d) => d.name)).toContain('get_stats_dashboard');
+  });
+
+  it('does not drift from the tools registerApps actually registers', () => {
+    // Every registered app tool must have a descriptor and vice versa, and the
+    // descriptions must match — so search_tools shows exactly what's callable.
+    const { server, tools } = makeStubServer();
+    registerApps(server, makeStatsMockOf().of);
+    const registered = tools
+      .map((t) => ({ name: t.name, description: t.config.description ?? '' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const descriptors = APP_TOOL_DESCRIPTORS.map((d) => ({
+      name: d.name,
+      description: d.description,
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    expect(descriptors).toEqual(registered);
   });
 });
 

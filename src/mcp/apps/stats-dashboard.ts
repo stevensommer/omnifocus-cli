@@ -352,7 +352,9 @@ export const STATS_DASHBOARD_HTML = `<!doctype html>
       tone: flagged !== null && flagged > 0 ? 'warn' : undefined
     }));
     cards.appendChild(card('Overdue', fmt(tasks.overdueActiveTasks), {
-      tone: overdue !== null && overdue > 0 ? 'bad' : 'ok'
+      // Unknown (null) stays neutral: only a known zero earns the green
+      // "all clear", and any positive count is bad.
+      tone: overdue === null ? undefined : overdue > 0 ? 'bad' : 'ok'
     }));
     cards.appendChild(card('Completion', rate === null ? '–' : fmt(rate) + '%'));
     cards.appendChild(card('Projects', fmt(projects.totalProjects), {
@@ -387,6 +389,11 @@ export const STATS_DASHBOARD_HTML = `<!doctype html>
   function applyHostContext(ctx) {
     if (ctx && (ctx.theme === 'dark' || ctx.theme === 'light')) {
       document.documentElement.setAttribute('data-theme', ctx.theme);
+    } else {
+      // Host reverted to follow-system (or sent no theme): drop the override
+      // so the prefers-color-scheme media query takes over again, instead of
+      // leaving the widget stuck on the last explicit theme.
+      document.documentElement.removeAttribute('data-theme');
     }
   }
 
@@ -445,6 +452,12 @@ export const STATS_DASHBOARD_HTML = `<!doctype html>
   }
 
   window.addEventListener('message', function (event) {
+    // Only trust messages from the embedding host frame. The host's origin is
+    // opaque under the sandbox so event.origin can't be checked, but the
+    // source window reference is reliable: anything not from window.parent
+    // (other frames, this window itself) is rejected before it can drive the
+    // JSON-RPC bridge.
+    if (event.source !== window.parent) return;
     var msg = event.data;
     if (!msg || msg.jsonrpc !== '2.0') return;
     // Response to one of our requests.

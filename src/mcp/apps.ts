@@ -13,6 +13,27 @@ import { STATS_DASHBOARD_HTML } from './apps/stats-dashboard.js';
 export const STATS_DASHBOARD_URI = 'ui://omnifocus/stats-dashboard.html';
 
 /**
+ * A discoverable app tool: name + description only. App tools are registered
+ * directly on the server (via registerAppTool) rather than through
+ * buildTools(), so search_tools would otherwise never surface them. Exporting
+ * their {name, description} here — and consuming the same constant both when
+ * registering (below) and inside search_tools — keeps the app surface
+ * discoverable without duplicating metadata or letting the two drift.
+ */
+export interface AppToolDescriptor {
+  name: string;
+  description: string;
+}
+
+const GET_STATS_DASHBOARD_DESCRIPTION =
+  'Get combined task, project, and tag statistics in one call. In MCP Apps hosts this renders an interactive dashboard; elsewhere it returns the combined JSON.';
+
+/** The single source of truth for app tools search_tools should also match. */
+export const APP_TOOL_DESCRIPTORS: readonly AppToolDescriptor[] = [
+  { name: 'get_stats_dashboard', description: GET_STATS_DASHBOARD_DESCRIPTION },
+];
+
+/**
  * Register MCP Apps (spec 2026-01-26, extension io.modelcontextprotocol/ui):
  * a ui:// HTML resource plus the app-linked tools that feed it. Kept separate
  * from the buildTools() catalogue in server.ts so the plain tool list and the
@@ -48,8 +69,7 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
     'get_stats_dashboard',
     {
       title: 'Stats dashboard',
-      description:
-        'Get combined task, project, and tag statistics in one call. In MCP Apps hosts this renders an interactive dashboard; elsewhere it returns the combined JSON.',
+      description: GET_STATS_DASHBOARD_DESCRIPTION,
       inputSchema: {},
       // Mirrors the READ preset in server.ts (title duplicated into
       // annotations for clients that predate the top-level title field).

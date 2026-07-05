@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z, type ZodRawShape } from 'zod';
 import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
-import { registerApps } from './apps.js';
+import { APP_TOOL_DESCRIPTORS, registerApps } from './apps.js';
 
 /**
  * A single MCP tool definition. `buildTools()` returns these as the one source
@@ -679,9 +679,17 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           // model see it failed and retry with a valid pattern.
           throw new OmniFocusCliError(`Invalid regex pattern: ${query}`, 400);
         }
-        const matches = tools
-          .filter((t) => pattern.test(t.name) || pattern.test(t.description))
-          .map((t) => ({ name: t.name, description: t.description }));
+        // App tools (get_stats_dashboard, …) are registered separately via
+        // registerApps and aren't in `tools`, but they're just as callable —
+        // so fold their {name, description} descriptors in here to keep them
+        // discoverable. The plain tools stay the single source for `tools`.
+        const searchable: Array<{ name: string; description: string }> = [
+          ...tools.map((t) => ({ name: t.name, description: t.description })),
+          ...APP_TOOL_DESCRIPTORS.map((d) => ({ name: d.name, description: d.description })),
+        ];
+        const matches = searchable.filter(
+          (t) => pattern.test(t.name) || pattern.test(t.description)
+        );
         return jsonResponse({ tools: matches });
       }
     )
