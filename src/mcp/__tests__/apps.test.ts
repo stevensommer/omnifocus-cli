@@ -2,8 +2,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { describe, expect, it } from 'vitest';
 import type { OmniFocus } from '../../lib/omnifocus.js';
-import { APP_TOOL_DESCRIPTORS, registerApps, STATS_DASHBOARD_URI } from '../apps.js';
+import { APP_TOOL_DESCRIPTORS, registerApps, STATS_DASHBOARD_URI, TRIAGE_URI } from '../apps.js';
 import { STATS_DASHBOARD_HTML } from '../apps/stats-dashboard.js';
+import { TRIAGE_HTML } from '../apps/triage.js';
 
 /**
  * Exercises the MCP Apps registration without OmniFocus, osascript, or a real
@@ -63,43 +64,90 @@ function makeStubServer(): {
   return { server: server as unknown as McpServer, tools, resources };
 }
 
-const STATS_METHODS = ['getTaskStats', 'getProjectStats', 'getTagStats'] as const;
+const OF_METHODS = [
+  'getTaskStats',
+  'getProjectStats',
+  'getTagStats',
+  'listInboxTasks',
+  'listTasks',
+  'searchTasks',
+] as const;
 
 function makeStatsMockOf(returns: Partial<Record<string, unknown>> = {}): {
   of: OmniFocus;
   calls: string[];
+  argCalls: Array<{ method: string; args: unknown[] }>;
 } {
   const calls: string[] = [];
+  const argCalls: Array<{ method: string; args: unknown[] }> = [];
   const of: Record<string, unknown> = {};
-  for (const method of STATS_METHODS) {
-    of[method] = async () => {
+  for (const method of OF_METHODS) {
+    of[method] = async (...args: unknown[]) => {
       calls.push(method);
+      argCalls.push({ method, args });
       const value = returns[method];
       if (value instanceof Error) throw value;
       return value;
     };
   }
-  return { of: of as unknown as OmniFocus, calls };
+  return { of: of as unknown as OmniFocus, calls, argCalls };
+}
+
+function findTool(tools: CapturedTool[], name: string): CapturedTool {
+  const tool = tools.find((t) => t.name === name);
+  if (!tool) throw new Error(`tool not registered: ${name}`);
+  return tool;
+}
+
+function findResource(resources: CapturedResource[], uri: string): CapturedResource {
+  const resource = resources.find((r) => r.uri === uri);
+  if (!resource) throw new Error(`resource not registered: ${uri}`);
+  return resource;
+}
+
+/** Minimal task rows for triage handler tests. */
+function makeTasks(count: number): Array<{ id: string; name: string }> {
+  return Array.from({ length: count }, (_v, i) => ({ id: `t${i}`, name: `Task ${i}` }));
 }
 
 describe('registerApps resource registration', () => {
   it('registers the dashboard template under the ui:// URI with the MCP Apps mime type', () => {
     const { server, resources } = makeStubServer();
     registerApps(server, makeStatsMockOf().of);
-    expect(resources).toHaveLength(1);
-    expect(resources[0].uri).toBe('ui://omnifocus/stats-dashboard.html');
-    expect(resources[0].uri).toBe(STATS_DASHBOARD_URI);
-    expect(resources[0].config.mimeType).toBe('text/html;profile=mcp-app');
+    expect(resources).toHaveLength(2);
+    const dashboard = findResource(resources, STATS_DASHBOARD_URI);
+    expect(dashboard.uri).toBe('ui://omnifocus/stats-dashboard.html');
+    expect(dashboard.config.mimeType).toBe('text/html;profile=mcp-app');
   });
 
   it('serves the self-contained dashboard HTML from the read callback', async () => {
     const { server, resources } = makeStubServer();
     registerApps(server, makeStatsMockOf().of);
-    const result = await resources[0].read(new URL(STATS_DASHBOARD_URI), {});
+    const dashboard = findResource(resources, STATS_DASHBOARD_URI);
+    const result = await dashboard.read(new URL(STATS_DASHBOARD_URI), {});
     expect(result.contents).toHaveLength(1);
     expect(result.contents[0].uri).toBe(STATS_DASHBOARD_URI);
     expect(result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
     expect(result.contents[0].text).toBe(STATS_DASHBOARD_HTML);
+  });
+
+  it('registers the triage template under the ui:// URI with the MCP Apps mime type', () => {
+    const { server, resources } = makeStubServer();
+    registerApps(server, makeStatsMockOf().of);
+    const triage = findResource(resources, TRIAGE_URI);
+    expect(triage.uri).toBe('ui://omnifocus/triage.html');
+    expect(triage.config.mimeType).toBe('text/html;profile=mcp-app');
+  });
+
+  it('serves the self-contained triage HTML from the read callback', async () => {
+    const { server, resources } = makeStubServer();
+    registerApps(server, makeStatsMockOf().of);
+    const triage = findResource(resources, TRIAGE_URI);
+    const result = await triage.read(new URL(TRIAGE_URI), {});
+    expect(result.contents).toHaveLength(1);
+    expect(result.contents[0].uri).toBe(TRIAGE_URI);
+    expect(result.contents[0].mimeType).toBe('text/html;profile=mcp-app');
+    expect(result.contents[0].text).toBe(TRIAGE_HTML);
   });
 });
 
@@ -314,9 +362,8 @@ describe('get_stats_dashboard tool registration', () => {
   it('registers with a title, READ-style annotations, and the ui resource link', () => {
     const { server, tools } = makeStubServer();
     registerApps(server, makeStatsMockOf().of);
-    expect(tools).toHaveLength(1);
-    const tool = tools[0];
-    expect(tool.name).toBe('get_stats_dashboard');
+    expect(tools).toHaveLength(2);
+    const tool = findTool(tools, 'get_stats_dashboard');
     expect(tool.config.title).toBe('Stats dashboard');
     expect(tool.config.annotations).toMatchObject({
       title: 'Stats dashboard',
@@ -365,7 +412,7 @@ describe('get_stats_dashboard handler', () => {
     const { server, tools } = makeStubServer();
     registerApps(server, of);
 
-    const result = await tools[0].handler({}, {});
+    const result = await findTool(tools, 'get_stats_dashboard').handler({}, {});
     expect([...calls].sort()).toEqual(['getProjectStats', 'getTagStats', 'getTaskStats']);
     const combined = { tasks: taskStats, projects: projectStats, tags: tagStats };
     expect(result.structuredContent).toEqual(combined);
@@ -385,7 +432,148 @@ describe('get_stats_dashboard handler', () => {
     const { server, tools } = makeStubServer();
     registerApps(server, of);
 
-    const result = await tools[0].handler({}, {});
+    const result = await findTool(tools, 'get_stats_dashboard').handler({}, {});
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error).toMatchObject({
+      name: 'omnifocus_error',
+      detail: 'OmniFocus is not running',
+      statusCode: 500,
+    });
+  });
+});
+
+describe('triage HTML template', () => {
+  it('is a self-contained document that speaks the MCP Apps handshake', () => {
+    expect(TRIAGE_HTML).toContain('<!doctype html>');
+    expect(TRIAGE_HTML).toContain('ui/initialize');
+    expect(TRIAGE_HTML).toContain('ui/notifications/initialized');
+    expect(TRIAGE_HTML).toContain('ui/notifications/tool-result');
+    expect(TRIAGE_HTML).toContain("protocolVersion: '2026-01-26'");
+  });
+
+  it('calls back to the server through app-to-host tools/call requests', () => {
+    expect(TRIAGE_HTML).toContain("'tools/call'");
+    expect(TRIAGE_HTML).toContain("'update_task'");
+  });
+
+  it('references no external network resources (strict host CSP)', () => {
+    expect(TRIAGE_HTML).not.toMatch(/https?:\/\/(?!www\.w3\.org)/);
+    expect(TRIAGE_HTML).not.toContain('<link');
+    expect(TRIAGE_HTML).not.toContain('src=');
+    expect(TRIAGE_HTML).not.toContain('@import');
+    expect(TRIAGE_HTML).not.toContain('fetch(');
+  });
+
+  it('stays within the inline size budget', () => {
+    expect(Buffer.byteLength(TRIAGE_HTML, 'utf8')).toBeLessThan(60_000);
+  });
+});
+
+describe('triage_tasks tool registration', () => {
+  it('registers with a title, READ annotations, and the ui resource link', () => {
+    const { server, tools } = makeStubServer();
+    registerApps(server, makeStatsMockOf().of);
+    const tool = findTool(tools, 'triage_tasks');
+    expect(tool.config.title).toBe('Triage tasks');
+    expect(tool.config.annotations).toMatchObject({
+      title: 'Triage tasks',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect(tool.config._meta?.ui).toMatchObject({ resourceUri: TRIAGE_URI });
+    // registerAppTool mirrors the URI into the legacy key for older hosts.
+    expect(tool.config._meta?.['ui/resourceUri']).toBe(TRIAGE_URI);
+  });
+});
+
+describe('triage_tasks handler', () => {
+  it('defaults to the inbox filter and returns text plus structuredContent', async () => {
+    const tasks = makeTasks(2);
+    const { of, calls } = makeStatsMockOf({ listInboxTasks: tasks });
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler({}, {});
+    expect(calls).toEqual(['listInboxTasks']);
+    const payload = { filter: 'inbox', total: 2, shown: 2, tasks };
+    expect(result.structuredContent).toEqual(payload);
+    const block = result.content[0] as { type: string; text: string };
+    expect(block.type).toBe('text');
+    expect(JSON.parse(block.text)).toEqual(payload);
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('maps filter=actionable to listTasks({ status: "actionable" })', async () => {
+    const { of, argCalls } = makeStatsMockOf({ listTasks: makeTasks(1) });
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler({ filter: 'actionable' }, {});
+    expect(argCalls).toEqual([{ method: 'listTasks', args: [{ status: 'actionable' }] }]);
+    expect(result.structuredContent).toMatchObject({ filter: 'actionable', total: 1, shown: 1 });
+  });
+
+  it('maps filter=flagged to listTasks({ flagged: true })', async () => {
+    const { of, argCalls } = makeStatsMockOf({ listTasks: makeTasks(1) });
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler({ filter: 'flagged' }, {});
+    expect(argCalls).toEqual([{ method: 'listTasks', args: [{ flagged: true }] }]);
+    expect(result.structuredContent).toMatchObject({ filter: 'flagged', total: 1, shown: 1 });
+  });
+
+  it('maps filter=search to searchTasks(query)', async () => {
+    const { of, argCalls } = makeStatsMockOf({ searchTasks: makeTasks(1) });
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler(
+      { filter: 'search', query: 'milk' },
+      {}
+    );
+    expect(argCalls).toEqual([{ method: 'searchTasks', args: ['milk'] }]);
+    expect(result.structuredContent).toMatchObject({ filter: 'search', total: 1, shown: 1 });
+  });
+
+  it('truncates to limit while reporting the untruncated total', async () => {
+    const tasks = makeTasks(5);
+    const { of } = makeStatsMockOf({ listInboxTasks: tasks });
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler({ limit: 3 }, {});
+    const payload = result.structuredContent as { total: number; shown: number; tasks: unknown[] };
+    expect(payload.total).toBe(5);
+    expect(payload.shown).toBe(3);
+    expect(payload.tasks).toEqual(tasks.slice(0, 3));
+  });
+
+  it('returns a clean 400 error result when filter=search has no query', async () => {
+    const { of, calls } = makeStatsMockOf();
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler({ filter: 'search' }, {});
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error).toMatchObject({
+      name: 'cli_error',
+      detail: 'filter "search" requires a query',
+      statusCode: 400,
+    });
+  });
+
+  it('maps OmniFocus failures to isError results with the structured CLI error JSON', async () => {
+    const { of } = makeStatsMockOf({ listInboxTasks: new Error('OmniFocus is not running') });
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler({}, {});
     expect(result.isError).toBe(true);
     const body = JSON.parse((result.content[0] as { text: string }).text);
     expect(body.error).toMatchObject({
