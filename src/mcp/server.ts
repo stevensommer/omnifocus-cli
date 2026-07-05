@@ -205,8 +205,15 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Get task',
       'Get a specific task by ID or name',
       READ,
-      { idOrName: z.string().describe('Task ID or name') },
-      async ({ idOrName }) => jsonResponse(await of.getTask(idOrName))
+      {
+        idOrName: z.string().describe('Task ID or name'),
+        includeChildren: z
+          .boolean()
+          .optional()
+          .describe('Include one level of serialized child tasks as "children"'),
+      },
+      async ({ idOrName, includeChildren }) =>
+        jsonResponse(await of.getTask(idOrName, { includeChildren }))
     ),
     def(
       'create_task',
@@ -217,6 +224,12 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         name: z.string().describe('Task name'),
         note: z.string().optional().describe('Task note'),
         project: z.string().optional().describe('Project to add task to'),
+        parent: z
+          .string()
+          .optional()
+          .describe(
+            'Parent task ID or name: create as a subtask (action group member). Mutually exclusive with project'
+          ),
         tags: z.array(z.string()).optional().describe('Tags to assign'),
         defer: z.string().optional().describe('Defer date (ISO 8601)'),
         due: z.string().optional().describe('Due date (ISO 8601)'),
@@ -236,6 +249,10 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         name: z.string().optional().describe('New task name'),
         note: z.string().optional().describe('New task note'),
         project: z.string().optional().describe('Move to project'),
+        parent: z
+          .string()
+          .optional()
+          .describe('Reparent under this task (ID or name). Mutually exclusive with project'),
         tags: z.array(z.string()).optional().describe('Replace tags'),
         defer: z.string().optional().describe('New defer date (ISO 8601)'),
         due: z.string().optional().describe('New due date (ISO 8601)'),
@@ -243,8 +260,118 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         flagged: z.boolean().optional().describe('Flag/unflag the task'),
         estimatedMinutes: z.number().optional().describe('New estimated duration'),
         completed: z.boolean().optional().describe('Mark complete/incomplete'),
+        sequential: z
+          .boolean()
+          .optional()
+          .describe('Children must be completed in order (action group)'),
+        completedByChildren: z
+          .boolean()
+          .optional()
+          .describe('Auto-complete the task when its last child completes'),
       },
       async ({ idOrName, ...options }) => jsonResponse(await of.updateTask(idOrName, options))
+    ),
+    def(
+      'set_task_repeat',
+      'Set task repeat',
+      'Set or clear a task\'s repeat pattern. The rule is an ICS RRULE string, e.g. "FREQ=WEEKLY;BYDAY=MO" or "FREQ=MONTHLY;INTERVAL=3". schedule "regularly" repeats from the assigned dates; "fromCompletion" reschedules when the task is completed. The anchor picks which date the rule advances.',
+      UPDATE,
+      {
+        idOrName: z.string().describe('Task ID or name'),
+        rule: z
+          .string()
+          .optional()
+          .describe('ICS RRULE string, e.g. "FREQ=WEEKLY;BYDAY=MO" (required unless clear)'),
+        schedule: z
+          .enum(['regularly', 'fromCompletion'])
+          .optional()
+          .describe('Repeat schedule (default regularly)'),
+        anchor: z
+          .enum(['dueDate', 'deferDate', 'plannedDate'])
+          .optional()
+          .describe('Anchor date the rule advances (default dueDate)'),
+        catchUp: z
+          .boolean()
+          .optional()
+          .describe('Skip past occurrences when resolving (regularly-repeating items only)'),
+        clear: z.boolean().optional().describe('Remove the repetition rule instead'),
+      },
+      async ({ idOrName, ...options }) => jsonResponse(await of.setTaskRepeat(idOrName, options))
+    ),
+    def(
+      'move_task',
+      'Move task',
+      'Move a task to a project, under a parent task, to the inbox, or to a position relative to a sibling task. Give exactly one destination in "to" (with optional beginning/end position, default end), or a {before}/{after} position alone (the sibling task implies the container).',
+      UPDATE,
+      {
+        idOrName: z.string().describe('Task ID or name'),
+        to: z
+          .object({
+            project: z.string().optional().describe('Destination project ID or name'),
+            parentTask: z
+              .string()
+              .optional()
+              .describe('Destination parent task ID or name (makes the task a subtask)'),
+            inbox: z.boolean().optional().describe('Move to the inbox'),
+          })
+          .optional()
+          .describe('Destination container (exactly one of project, parentTask, inbox)'),
+        position: z
+          .union([
+            z.enum(['beginning', 'end']),
+            z.object({ before: z.string().describe('Sibling task ID or name') }),
+            z.object({ after: z.string().describe('Sibling task ID or name') }),
+          ])
+          .optional()
+          .describe(
+            'Where to place the task: beginning/end of the destination, or before/after a sibling task'
+          ),
+      },
+      async ({ idOrName, to, position }) =>
+        jsonResponse(await of.moveTask(idOrName, { ...to, position }))
+    ),
+    def(
+      'duplicate_task',
+      'Duplicate task',
+      'Duplicate a task (children come along). Accepts the same destination options as move_task; with no destination the copy lands right after the original. Returns the new task.',
+      CREATE,
+      {
+        idOrName: z.string().describe('Task ID or name'),
+        to: z
+          .object({
+            project: z.string().optional().describe('Destination project ID or name'),
+            parentTask: z.string().optional().describe('Destination parent task ID or name'),
+            inbox: z.boolean().optional().describe('Duplicate into the inbox'),
+          })
+          .optional()
+          .describe('Destination container (exactly one of project, parentTask, inbox)'),
+        position: z
+          .union([
+            z.enum(['beginning', 'end']),
+            z.object({ before: z.string().describe('Sibling task ID or name') }),
+            z.object({ after: z.string().describe('Sibling task ID or name') }),
+          ])
+          .optional()
+          .describe(
+            'Where to place the copy: beginning/end of the destination, or before/after a sibling task'
+          ),
+      },
+      async ({ idOrName, to, position }) =>
+        jsonResponse(await of.duplicateTask(idOrName, { ...to, position }))
+    ),
+    def(
+      'parse_tasks',
+      'Parse tasks from text',
+      'Create tasks from OmniFocus transport text, a compact shorthand: "Task name! ::Project #defer #due $duration @tag //note". "!" at the end of a title flags it; "::" (or ">") assigns a project; the first "#date" is the defer date and the second the due date (one "#date" alone is due); "$" sets a duration estimate (e.g. $2h); "@" adds a tag; "//" starts a note; lines starting with "--" begin additional tasks. Tasks land in the inbox unless a project option is given.',
+      CREATE,
+      {
+        text: z.string().describe('Transport text to parse (may contain multiple tasks)'),
+        project: z
+          .string()
+          .optional()
+          .describe('Move the created tasks into this project (ID or name)'),
+      },
+      async ({ text, project }) => jsonResponse(await of.parseTasks(text, { project }))
     ),
     def(
       'drop_task',

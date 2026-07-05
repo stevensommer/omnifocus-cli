@@ -99,6 +99,185 @@ describe('updateTask script generation', () => {
     );
     expect(scripts).toHaveLength(0);
   });
+
+  it('reparents under another task via moveTasks', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.updateTask('My Task', { parent: 'Group' });
+    expect(scripts[0]).toContain('const newParent = findTask(\\"Group\\");');
+    expect(scripts[0]).toContain('moveTasks([task], newParent)');
+  });
+
+  it('sets sequential and completedByChildren', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.updateTask('My Task', { sequential: true, completedByChildren: false });
+    expect(scripts[0]).toContain('task.sequential = true;');
+    expect(scripts[0]).toContain('task.completedByChildren = false;');
+  });
+
+  it('rejects project together with parent with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.updateTask('t', { project: 'P', parent: 'G' })).rejects.toThrow(
+      'Cannot set both project and parent'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('createTask hierarchy script generation', () => {
+  it('constructs the task under a parent task when parent is given', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.createTask({ name: 'Child', parent: 'Group' });
+    expect(scripts[0]).toContain('const parentTask = findTask(\\"Group\\");');
+    expect(scripts[0]).toContain('new Task(\\"Child\\", parentTask)');
+  });
+
+  it('rejects parent together with project with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.createTask({ name: 'Child', parent: 'G', project: 'P' })).rejects.toThrow(
+      'Cannot set both project and parent'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('getTask children script generation', () => {
+  it('serializes one level of children only when includeChildren is set', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.getTask('t1', { includeChildren: true });
+    expect(scripts[0]).toContain('result.children = task.children.map(c => serializeTask(c));');
+
+    const second = captureScript('{}');
+    await second.of.getTask('t1');
+    expect(second.scripts[0]).not.toContain('result.children');
+  });
+});
+
+describe('setTaskRepeat script generation', () => {
+  it('uses the 4.7+ five-arg RepetitionRule constructor with defaults', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.setTaskRepeat('t1', { rule: 'FREQ=WEEKLY;BYDAY=MO' });
+    expect(scripts[0]).toContain(
+      'task.repetitionRule = new Task.RepetitionRule(\\"FREQ=WEEKLY;BYDAY=MO\\", null, Task.RepetitionScheduleType.Regularly, Task.AnchorDateKey.DueDate, false);'
+    );
+    expect(scripts[0]).toContain('serializeTask(task)');
+  });
+
+  it('maps fromCompletion, alternate anchors, and catchUp', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.setTaskRepeat('t1', {
+      rule: 'FREQ=DAILY',
+      schedule: 'fromCompletion',
+      anchor: 'deferDate',
+      catchUp: true,
+    });
+    expect(scripts[0]).toContain('Task.RepetitionScheduleType.FromCompletion');
+    expect(scripts[0]).toContain('Task.AnchorDateKey.DeferDate');
+    expect(scripts[0]).toContain(', true);');
+  });
+
+  it('clear assigns null instead of constructing a rule', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.setTaskRepeat('t1', { clear: true });
+    expect(scripts[0]).toContain('task.repetitionRule = null;');
+    expect(scripts[0]).not.toContain('new Task.RepetitionRule(');
+  });
+
+  it('rejects a missing rule and clear+rule with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.setTaskRepeat('t1', {})).rejects.toThrow('A rule is required');
+    await expect(of.setTaskRepeat('t1', { clear: true, rule: 'FREQ=DAILY' })).rejects.toThrow(
+      'Cannot combine clear with a rule'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('moveTask script generation', () => {
+  it('moves to a project ending by default and beginning on request', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.moveTask('t1', { project: 'House' });
+    expect(scripts[0]).toContain('const position = findProject(\\"House\\").ending;');
+    expect(scripts[0]).toContain('moveTasks([task], position);');
+
+    const second = captureScript('{}');
+    await second.of.moveTask('t1', { project: 'House', position: 'beginning' });
+    expect(second.scripts[0]).toContain('const position = findProject(\\"House\\").beginning;');
+  });
+
+  it('moves under a parent task', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.moveTask('t1', { parentTask: 'Group' });
+    expect(scripts[0]).toContain('const position = findTask(\\"Group\\").ending;');
+  });
+
+  it('moves to the inbox beginning or ending', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.moveTask('t1', { inbox: true });
+    expect(scripts[0]).toContain('const position = inbox.ending;');
+
+    const second = captureScript('{}');
+    await second.of.moveTask('t1', { inbox: true, position: 'beginning' });
+    expect(second.scripts[0]).toContain('const position = inbox.beginning;');
+  });
+
+  it('resolves before/after sibling positions', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.moveTask('t1', { position: { before: 'Sib' } });
+    expect(scripts[0]).toContain('const position = findTask(\\"Sib\\").before;');
+
+    const second = captureScript('{}');
+    await second.of.moveTask('t1', { position: { after: 'Sib' } });
+    expect(second.scripts[0]).toContain('const position = findTask(\\"Sib\\").after;');
+  });
+
+  it('rejects zero or competing destinations with a 400 before touching OmniFocus', async () => {
+    const { of, scripts } = captureScript('{}');
+    await expect(of.moveTask('t1', {})).rejects.toThrow('exactly one destination');
+    await expect(of.moveTask('t1', { project: 'P', inbox: true })).rejects.toThrow(
+      'exactly one destination'
+    );
+    await expect(of.moveTask('t1', { project: 'P', position: { before: 'S' } })).rejects.toThrow(
+      'exactly one destination'
+    );
+    expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('duplicateTask script generation', () => {
+  it('duplicates in place (after the original) by default and returns the copy', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.duplicateTask('t1');
+    expect(scripts[0]).toContain('const position = task.after;');
+    expect(scripts[0]).toContain('const newTasks = duplicateTasks([task], position);');
+    expect(scripts[0]).toContain('serializeTask(newTasks[0])');
+  });
+
+  it('accepts the same destinations as moveTask', async () => {
+    const { of, scripts } = captureScript('{}');
+    await of.duplicateTask('t1', { project: 'House', position: 'beginning' });
+    expect(scripts[0]).toContain('const position = findProject(\\"House\\").beginning;');
+    expect(scripts[0]).toContain('duplicateTasks([task], position)');
+  });
+});
+
+describe('parseTasks script generation', () => {
+  it('parses transport text into inbox tasks and serializes them all', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.parseTasks('Fix gutters! @errands //note');
+    expect(scripts[0]).toContain(
+      'Task.byParsingTransportText(\\"Fix gutters! @errands //note\\", null)'
+    );
+    expect(scripts[0]).toContain('created.map(t => serializeTask(t))');
+    expect(scripts[0]).not.toContain('moveTasks(');
+  });
+
+  it('moves the created tasks into a project in the same script', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.parseTasks('A -- B', { project: 'House' });
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0]).toContain('findProject(\\"House\\")');
+    expect(scripts[0]).toContain('moveTasks(created, targetProject);');
+  });
 });
 
 describe('listTasks filter generation', () => {
@@ -187,12 +366,44 @@ describe('serializer coverage', () => {
     expect(scripts[0]).not.toContain('task.estimatedMinutes || null');
   });
 
-  it('serializeProject includes dates, flagged, nextTask, and url', async () => {
+  it('serializeTask includes hierarchy fields and the repetition rule', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks();
+    expect(scripts[0]).toContain('parentId: taskParentId(task)');
+    expect(scripts[0]).toContain('hasChildren: task.hasChildren');
+    expect(scripts[0]).toContain('childIds: task.children.map(c => c.id.primaryKey)');
+    expect(scripts[0]).toContain('sequential: task.sequential');
+    expect(scripts[0]).toContain('inInbox: task.inInbox');
+    expect(scripts[0]).toContain('repetition: serializeRepetition(task.repetitionRule)');
+  });
+
+  it('parentId treats the project root task as no parent', async () => {
+    // A task directly in a project has the project's invisible root task as
+    // its .parent (Project.task); parentId must be null there, so the
+    // discriminator compares parent.id against containingProject.task.id.
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks();
+    expect(scripts[0]).toContain(
+      'if (project && parent.id.primaryKey === project.task.id.primaryKey) return null;'
+    );
+  });
+
+  it('serializeRepetition maps the 4.7 enums to strings', async () => {
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks();
+    expect(scripts[0]).toContain('Task.RepetitionScheduleType.FromCompletion');
+    expect(scripts[0]).toContain('Task.AnchorDateKey.PlannedDate');
+    expect(scripts[0]).toContain('ruleString: rule.ruleString');
+    expect(scripts[0]).toContain('catchUpAutomatically: rule.catchUpAutomatically');
+  });
+
+  it('serializeProject includes dates, flagged, nextTask, repetition, and url', async () => {
     const { of, scripts } = captureScript('{}');
     await of.getProject('X');
     expect(scripts[0]).toContain('flagged: project.flagged');
     expect(scripts[0]).toContain('due: isoOrNull(project.dueDate)');
     expect(scripts[0]).toContain('nextTask: nextTask ?');
+    expect(scripts[0]).toContain('repetition: serializeRepetition(project.repetitionRule)');
     expect(scripts[0]).toContain("url: objectUrl(project, 'project')");
     expect(scripts[0]).toContain('estimatedMinutes: numberOrNull(project.estimatedMinutes)');
     expect(scripts[0]).not.toContain('project.estimatedMinutes || null');

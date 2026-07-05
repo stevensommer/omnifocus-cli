@@ -25,6 +25,18 @@ export interface Task {
   effectiveFlagged: boolean;
   taskStatus: TaskStatus;
   project: string | null;
+  /**
+   * ID of the parent *task* (action group). Null when the task sits directly
+   * in a project or at the inbox root — a project-level task's Omni
+   * Automation .parent is the project's invisible root task, which is
+   * reported as null here.
+   */
+  parentId: string | null;
+  hasChildren: boolean;
+  childIds: string[];
+  sequential: boolean;
+  inInbox: boolean;
+  repetition: Repetition | null;
   tags: string[];
   defer: string | null;
   due: string | null;
@@ -37,6 +49,25 @@ export interface Task {
   added: string | null;
   modified: string | null;
   url: string;
+  /** One level of serialized child tasks; only present via getTask({includeChildren}). */
+  children?: Task[];
+}
+
+/** How a repetition rule schedules the next occurrence. */
+export type RepetitionScheduleType = 'regularly' | 'fromCompletion' | 'none';
+
+/** Which date property anchors a repetition rule. */
+export type RepetitionAnchorDateKey = 'deferDate' | 'dueDate' | 'plannedDate';
+
+/**
+ * A task's or project's repeat pattern, mirroring Omni Automation's
+ * Task.RepetitionRule (ruleString is an ICS RRULE, e.g. "FREQ=WEEKLY").
+ */
+export interface Repetition {
+  ruleString: string;
+  scheduleType: RepetitionScheduleType;
+  anchorDateKey: RepetitionAnchorDateKey;
+  catchUpAutomatically: boolean;
 }
 
 /**
@@ -70,6 +101,7 @@ export interface Project {
   reviewInterval: ReviewInterval | null;
   lastReviewDate: string | null;
   nextReviewDate: string | null;
+  repetition: Repetition | null;
   url: string;
 }
 
@@ -107,6 +139,8 @@ export interface CreateTaskOptions {
   name: string;
   note?: string;
   project?: string;
+  /** Parent task ID or name: create the task as a child (action group member). Mutually exclusive with project. */
+  parent?: string;
   tags?: string[];
   defer?: string;
   due?: string;
@@ -119,6 +153,8 @@ export interface UpdateTaskOptions {
   name?: string;
   note?: string;
   project?: string;
+  /** Reparent under this task (ID or name). Mutually exclusive with project. */
+  parent?: string;
   tags?: string[];
   defer?: string | null;
   due?: string | null;
@@ -126,6 +162,50 @@ export interface UpdateTaskOptions {
   flagged?: boolean;
   estimatedMinutes?: number;
   completed?: boolean;
+  /** Children must be completed in order. */
+  sequential?: boolean;
+  /** Auto-complete the task when its last child completes. */
+  completedByChildren?: boolean;
+}
+
+export interface GetTaskOptions {
+  /** Include one level of serialized child tasks as `children`. */
+  includeChildren?: boolean;
+}
+
+/**
+ * Options for setting a task's repeat pattern. Either `clear` or `rule` must
+ * be given; schedule defaults to "regularly" and anchor to "dueDate".
+ */
+export interface SetTaskRepeatOptions {
+  /** ICS RRULE string, e.g. "FREQ=WEEKLY;BYDAY=MO". */
+  rule?: string;
+  schedule?: 'regularly' | 'fromCompletion';
+  anchor?: RepetitionAnchorDateKey;
+  /** Skip past occurrences when resolving (regularly-repeating items only). */
+  catchUp?: boolean;
+  /** Remove the repetition rule instead of setting one. */
+  clear?: boolean;
+}
+
+/** Where to place a task within its destination container. */
+export type TaskPosition = 'beginning' | 'end' | { before: string } | { after: string };
+
+/**
+ * Destination for moving or duplicating a task: exactly one of project,
+ * parentTask, or inbox (with optional beginning/end position), or a
+ * before/after position alone (the sibling implies the container).
+ */
+export interface MoveTaskOptions {
+  project?: string;
+  parentTask?: string;
+  inbox?: boolean;
+  position?: TaskPosition;
+}
+
+export interface ParseTasksOptions {
+  /** Move the created tasks from the inbox into this project (ID or name). */
+  project?: string;
 }
 
 export interface CreateProjectOptions {

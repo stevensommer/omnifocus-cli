@@ -5,11 +5,38 @@ import { OmniFocus } from '../lib/omnifocus.js';
 import { parseDateTime } from '../lib/dates.js';
 import { OmniFocusCliError } from '../lib/errors.js';
 import type {
+  MoveTaskOptions,
   TaskFilters,
   TaskStatusFilter,
   UpdateTaskOptions,
   UpdateTasksOptions,
 } from '../types.js';
+
+/**
+ * Map the shared move/duplicate CLI flags (--project/--parent/--inbox with
+ * --position, or --before/--after) onto MoveTaskOptions. Destination
+ * validation happens in the OmniFocus layer.
+ */
+function moveOptionsFromFlags(options: {
+  project?: string;
+  parent?: string;
+  inbox?: boolean;
+  position?: string;
+  before?: string;
+  after?: string;
+}): MoveTaskOptions {
+  if (options.position && options.position !== 'beginning' && options.position !== 'end') {
+    throw new Error(`Invalid position "${options.position}". Valid: beginning, end`);
+  }
+  return {
+    ...(options.project && { project: options.project }),
+    ...(options.parent && { parentTask: options.parent }),
+    ...(options.inbox && { inbox: true }),
+    ...(options.position === 'beginning' && { position: 'beginning' as const }),
+    ...(options.before && { position: { before: options.before } }),
+    ...(options.after && { position: { after: options.after } }),
+  };
+}
 
 const TASK_STATUS_FILTERS: TaskStatusFilter[] = [
   'actionable',
@@ -109,6 +136,10 @@ export function createTaskCommand(): Command {
     .command('create <name>')
     .description('Create a new task')
     .option('-p, --project <name>', 'Assign to project')
+    .option(
+      '--parent <idOrName>',
+      'Create as a subtask of this task (mutually exclusive with --project)'
+    )
     .option('--note <text>', 'Add note')
     .option('-t, --tag <tags...>', 'Add tags')
     .option('-d, --due <date>', 'Set due date')
@@ -123,6 +154,7 @@ export function createTaskCommand(): Command {
           name,
           note: options.note,
           project: options.project,
+          parent: options.parent,
           tags: options.tag,
           due: options.due ? parseDateTime(options.due) : undefined,
           defer: options.defer ? parseDateTime(options.defer) : undefined,
@@ -140,6 +172,11 @@ export function createTaskCommand(): Command {
     .option('-n, --name <name>', 'New name')
     .option('--note <text>', 'New note')
     .option('-p, --project <name>', 'Move to project')
+    .option('--parent <idOrName>', 'Reparent under this task (mutually exclusive with --project)')
+    .option('--sequential', 'Children must be completed in order')
+    .option('--no-sequential', 'Children may be completed in any order (parallel)')
+    .option('--completed-by-children', 'Auto-complete when the last child completes')
+    .option('--no-completed-by-children', 'Do not auto-complete when children complete')
     .option('-t, --tag <tags...>', 'Replace tags')
     .option('-d, --due <date>', 'Set due date')
     .option('-D, --defer <date>', 'Set defer date')
@@ -160,6 +197,11 @@ export function createTaskCommand(): Command {
           ...(options.name && { name: options.name }),
           ...(options.note !== undefined && { note: options.note }),
           ...(options.project && { project: options.project }),
+          ...(options.parent && { parent: options.parent }),
+          ...(options.sequential !== undefined && { sequential: options.sequential }),
+          ...(options.completedByChildren !== undefined && {
+            completedByChildren: options.completedByChildren,
+          }),
           ...(options.tag && { tags: options.tag }),
           ...(options.due !== undefined && {
             due: options.due ? parseDateTime(options.due) : null,
@@ -277,11 +319,85 @@ export function createTaskCommand(): Command {
   command
     .command('view <idOrName>')
     .description('View task details')
+    .option('--children', 'Include one level of serialized child tasks')
     .action(
-      withErrorHandling(async (idOrName) => {
+      withErrorHandling(async (idOrName, options) => {
         const of = new OmniFocus();
-        const task = await of.getTask(idOrName);
+        const task = await of.getTask(idOrName, { includeChildren: options.children });
         outputJson(task);
+      })
+    );
+
+  command
+    .command('repeat <idOrName>')
+    .description('Set or clear a task repeat pattern (ICS RRULE)')
+    .option('-r, --rule <rrule>', 'ICS RRULE string, e.g. "FREQ=WEEKLY;BYDAY=MO"')
+    .option(
+      '-s, --schedule <type>',
+      'Repeat schedule: regularly|fromCompletion (default regularly)'
+    )
+    .option('-a, --anchor <date>', 'Anchor date: dueDate|deferDate|plannedDate (default dueDate)')
+    .option('--catch-up', 'Skip past occurrences when resolving (regular repeats only)')
+    .option('--clear', 'Remove the repetition rule')
+    .action(
+      withErrorHandling(async (idOrName, options) => {
+        const of = new OmniFocus();
+        const task = await of.setTaskRepeat(idOrName, {
+          rule: options.rule,
+          schedule: options.schedule,
+          anchor: options.anchor,
+          catchUp: options.catchUp,
+          clear: options.clear,
+        });
+        outputJson(task);
+      })
+    );
+
+  command
+    .command('move <idOrName>')
+    .description('Move a task to a project, parent task, inbox, or relative to a sibling')
+    .option('-p, --project <idOrName>', 'Destination project')
+    .option('--parent <idOrName>', 'Destination parent task (makes it a subtask)')
+    .option('--inbox', 'Move to the inbox')
+    .option('--position <where>', 'beginning|end of the destination (default end)')
+    .option('--before <idOrName>', 'Place just before this sibling task')
+    .option('--after <idOrName>', 'Place just after this sibling task')
+    .action(
+      withErrorHandling(async (idOrName, options) => {
+        const of = new OmniFocus();
+        const task = await of.moveTask(idOrName, moveOptionsFromFlags(options));
+        outputJson(task);
+      })
+    );
+
+  command
+    .command('duplicate <idOrName>')
+    .description('Duplicate a task (children come along); defaults to just after the original')
+    .option('-p, --project <idOrName>', 'Destination project')
+    .option('--parent <idOrName>', 'Destination parent task')
+    .option('--inbox', 'Duplicate into the inbox')
+    .option('--position <where>', 'beginning|end of the destination (default end)')
+    .option('--before <idOrName>', 'Place just before this sibling task')
+    .option('--after <idOrName>', 'Place just after this sibling task')
+    .action(
+      withErrorHandling(async (idOrName, options) => {
+        const of = new OmniFocus();
+        const task = await of.duplicateTask(idOrName, moveOptionsFromFlags(options));
+        outputJson(task);
+      })
+    );
+
+  command
+    .command('parse <text>')
+    .description(
+      'Create tasks from transport text: "Name! ::Project #defer #due $2h @tag //note" (-- starts another task)'
+    )
+    .option('-p, --project <idOrName>', 'Move the created tasks into this project')
+    .action(
+      withErrorHandling(async (text, options) => {
+        const of = new OmniFocus();
+        const tasks = await of.parseTasks(text, { project: options.project });
+        outputJson(tasks);
       })
     );
 
