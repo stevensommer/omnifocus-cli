@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildTools, type ToolSpec } from '../server.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { buildTools, SERVER_INSTRUCTIONS, type ToolSpec } from '../server.js';
 import type { OmniFocus } from '../../lib/omnifocus.js';
 
 /**
@@ -51,7 +52,9 @@ function makeMockOf(returns: Partial<Record<string, unknown>> = {}): {
   for (const method of OF_METHODS) {
     of[method] = async (...args: unknown[]) => {
       calls.push({ method, args });
-      return method in returns ? returns[method] : undefined;
+      const value = method in returns ? returns[method] : undefined;
+      if (value instanceof Error) throw value;
+      return value;
     };
   }
   return { of: of as unknown as OmniFocus, calls };
@@ -195,10 +198,15 @@ describe('search_tools', () => {
     ]);
   });
 
-  it('reports invalid regex instead of throwing', async () => {
+  it('reports invalid regex through the isError envelope, not a bare success body', async () => {
+    // Must honour the same isError contract SERVER_INSTRUCTIONS documents for
+    // every other failure, so the model can tell the call failed.
     const tools = buildTools(makeMockOf().of);
-    const result = (await callTool(tools, 'search_tools', { query: '[' })) as { error?: string };
-    expect(result.error).toBe('Invalid regex pattern');
+    const result = await tool(tools, 'search_tools').handler({ query: '[' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error.statusCode).toBe(400);
+    expect(body.error.detail).toContain('Invalid regex pattern');
   });
 });
 
@@ -244,5 +252,54 @@ describe('tool handlers map arguments to OmniFocus calls', () => {
     const tools = buildTools(of);
     await callTool(tools, 'get_folder', { idOrName: 'Work', includeDropped: true });
     expect(calls).toContainEqual({ method: 'getFolder', args: ['Work', { includeDropped: true }] });
+  });
+});
+
+describe('handler failures become isError tool results (SEP-1303)', () => {
+  it('returns the structured CLI error JSON with isError, not a thrown protocol error', async () => {
+    const { of } = makeMockOf({ getTask: new Error('Task not found: xyz') });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'get_task').handler({ idOrName: 'xyz' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body).toEqual({
+      error: { name: 'omnifocus_error', detail: 'Task not found: xyz', statusCode: 404 },
+    });
+  });
+
+  it('maps unrecognised failures to a 500 error body', async () => {
+    const { of } = makeMockOf({ createTask: new Error('osascript blew up') });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'create_task').handler({ name: 'x' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error.statusCode).toBe(500);
+  });
+
+  it('successful calls do not set isError', async () => {
+    const { of } = makeMockOf({ getInboxCount: 3 });
+    const tools = buildTools(of);
+    const result = await tool(tools, 'get_inbox_count').handler({});
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('re-throws McpError so the SDK protocol path (e.g. elicitation) still works', async () => {
+    // McpError is the SDK's protocol-level signal; the SDK dispatcher
+    // special-cases it (createToolError skips it for UrlElicitationRequired).
+    // safeHandler must not swallow it into an isError result.
+    const { of } = makeMockOf({ getTask: new McpError(ErrorCode.InvalidRequest, 'protocol boom') });
+    const tools = buildTools(of);
+    await expect(tool(tools, 'get_task').handler({ idOrName: 'x' })).rejects.toBeInstanceOf(
+      McpError
+    );
+  });
+});
+
+describe('server instructions', () => {
+  it('document the conventions the model needs', () => {
+    expect(SERVER_INSTRUCTIONS).toContain('idOrName');
+    expect(SERVER_INSTRUCTIONS).toContain('ISO 8601');
+    expect(SERVER_INSTRUCTIONS).toContain('get_perspective_tasks');
+    expect(SERVER_INSTRUCTIONS).toContain('search_tools');
   });
 });

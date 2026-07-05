@@ -1,7 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { z, type ZodRawShape } from 'zod';
+import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 
 /**
@@ -70,7 +74,23 @@ function def<S extends ZodRawShape>(
   schema: S,
   handler: (args: z.infer<z.ZodObject<S>>) => CallToolResult | Promise<CallToolResult>
 ): ToolSpec {
-  return { name, title, description, annotations, schema, handler: handler as ToolSpec['handler'] };
+  // Operational failures become isError tool results (per SEP-1303) carrying
+  // the same structured error JSON as the CLI, so the calling model can read
+  // the failure and self-correct. McpError is re-thrown untouched: it is the
+  // SDK's protocol-level signal (e.g. elicitation-required) and the SDK's own
+  // dispatcher special-cases it — wrapping it here would break that path.
+  const safeHandler: ToolSpec['handler'] = async (args) => {
+    try {
+      return await handler(args as z.infer<z.ZodObject<S>>);
+    } catch (error) {
+      if (error instanceof McpError) throw error;
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) }],
+        isError: true,
+      };
+    }
+  };
+  return { name, title, description, annotations, schema, handler: safeHandler };
 }
 
 /**
@@ -357,15 +377,19 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           ),
       },
       async ({ query }) => {
+        let pattern: RegExp;
         try {
-          const pattern = new RegExp(query, 'i');
-          const matches = tools
-            .filter((t) => pattern.test(t.name) || pattern.test(t.description))
-            .map((t) => ({ name: t.name, description: t.description }));
-          return jsonResponse({ tools: matches });
+          pattern = new RegExp(query, 'i');
         } catch {
-          return jsonResponse({ error: 'Invalid regex pattern' });
+          // Route through the shared error envelope so this failure honours the
+          // documented isError contract like every other tool, letting the
+          // model see it failed and retry with a valid pattern.
+          throw new OmniFocusCliError(`Invalid regex pattern: ${query}`, 400);
         }
+        const matches = tools
+          .filter((t) => pattern.test(t.name) || pattern.test(t.description))
+          .map((t) => ({ name: t.name, description: t.description }));
+        return jsonResponse({ tools: matches });
       }
     )
   );
@@ -373,11 +397,52 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
   return tools;
 }
 
+/**
+ * The server version reported at initialize. tsup injects __VERSION__ at build
+ * time for the shipped binary; when running from source (vitest/bun, or any
+ * non-cli entry point where the define never ran) fall back to reading
+ * package.json rather than advertising a bogus sentinel for capability gating
+ * or telemetry. The '0.0.0-dev' sentinel remains only as a last resort if the
+ * package.json read itself fails.
+ */
+function resolveVersion(): string {
+  if (typeof __VERSION__ !== 'undefined') return __VERSION__;
+  try {
+    const pkgUrl = new URL('../../package.json', import.meta.url);
+    const pkg = JSON.parse(readFileSync(fileURLToPath(pkgUrl), 'utf8')) as { version?: string };
+    return pkg.version ?? '0.0.0-dev';
+  } catch {
+    return '0.0.0-dev';
+  }
+}
+
+const VERSION = resolveVersion();
+
+/**
+ * Sent to clients at initialize and injected into the model's context.
+ * Conventions that otherwise live only in README/CLAUDE.md belong here —
+ * this is the one place the calling model is guaranteed to see them.
+ */
+export const SERVER_INSTRUCTIONS = `CLI-backed MCP server for OmniFocus on macOS. OmniFocus must be installed and running; the first call may trigger a macOS Automation permission prompt.
+
+- Tools taking "idOrName" accept a primary key ID (e.g. "kXu3B-LZfFH") or an exact name. IDs are unambiguous and preferred — get them from the list/search tools first.
+- Dates are ISO 8601 strings: "YYYY-MM-DD" or a full timestamp like "2026-07-04T10:00:00". Returned dates are ISO strings.
+- Tag names may be hierarchical paths like "Parent/Child".
+- get_perspective_tasks requires an OmniFocus window to be open, may take up to 60 seconds, and switches the visible perspective as a side effect. Other tools are headless.
+- Failed calls return a JSON body {"error": {"name", "detail", "statusCode"}} with isError set; a 404 usually means the idOrName didn't match anything.
+- Use search_tools (case-insensitive regex over tool names/descriptions) to discover capabilities.`;
+
 export async function runMcpServer() {
-  const server = new McpServer({
-    name: 'omnifocus',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'omnifocus',
+      title: 'OmniFocus',
+      version: VERSION,
+      description: 'Manage OmniFocus tasks, projects, tags, folders, and perspectives on this Mac',
+      websiteUrl: 'https://github.com/stephendolan/omnifocus-cli#readme',
+    },
+    { instructions: SERVER_INSTRUCTIONS }
+  );
 
   const of = new OmniFocus();
   for (const tool of buildTools(of)) {
