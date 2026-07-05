@@ -17,7 +17,7 @@ import type {
  * --position, or --before/--after) onto MoveTaskOptions. Destination
  * validation happens in the OmniFocus layer.
  */
-function moveOptionsFromFlags(options: {
+export function moveOptionsFromFlags(options: {
   project?: string;
   parent?: string;
   inbox?: boolean;
@@ -27,6 +27,17 @@ function moveOptionsFromFlags(options: {
 }): MoveTaskOptions {
   if (options.position && options.position !== 'beginning' && options.position !== 'end') {
     throw new Error(`Invalid position "${options.position}". Valid: beginning, end`);
+  }
+  // --position, --before and --after all resolve to the single MoveTaskOptions
+  // `position` field, so passing more than one would silently collapse (last
+  // spread wins) into a surprising placement. Reject the conflict up front.
+  const positionalFlags = [
+    options.position && '--position',
+    options.before && '--before',
+    options.after && '--after',
+  ].filter(Boolean);
+  if (positionalFlags.length > 1) {
+    throw new Error(`Conflicting position flags: ${positionalFlags.join(', ')}. Use only one.`);
   }
   return {
     ...(options.project && { project: options.project }),

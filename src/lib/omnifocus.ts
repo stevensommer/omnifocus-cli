@@ -95,12 +95,19 @@ export class OmniFocus {
 
     function serializeRepetition(rule) {
       if (!rule) return null;
+      // Task.RepetitionScheduleType / Task.AnchorDateKey only exist on
+      // OmniFocus 4.7+. On older builds the namespaces are undefined, so
+      // guard every enum dereference — serializeTask calls this for every
+      // repeating task, and an unguarded access would throw a TypeError that
+      // breaks list/get/search entirely on those versions.
+      const schedNS = Task.RepetitionScheduleType;
+      const anchorNS = Task.AnchorDateKey;
       let scheduleType = 'regularly';
-      if (rule.scheduleType === Task.RepetitionScheduleType.FromCompletion) scheduleType = 'fromCompletion';
-      if (rule.scheduleType === Task.RepetitionScheduleType.None) scheduleType = 'none';
+      if (schedNS && rule.scheduleType === schedNS.FromCompletion) scheduleType = 'fromCompletion';
+      if (schedNS && rule.scheduleType === schedNS.None) scheduleType = 'none';
       let anchorDateKey = 'dueDate';
-      if (rule.anchorDateKey === Task.AnchorDateKey.DeferDate) anchorDateKey = 'deferDate';
-      if (rule.anchorDateKey === Task.AnchorDateKey.PlannedDate) anchorDateKey = 'plannedDate';
+      if (anchorNS && rule.anchorDateKey === anchorNS.DeferDate) anchorDateKey = 'deferDate';
+      if (anchorNS && rule.anchorDateKey === anchorNS.PlannedDate) anchorDateKey = 'plannedDate';
       return {
         ruleString: rule.ruleString,
         scheduleType: scheduleType,
@@ -1907,6 +1914,9 @@ export class OmniFocus {
         const task = findTask("${this.escapeString(idOrName)}");
         ${positionCode}
         const newTasks = duplicateTasks([task], position);
+        if (!newTasks || newTasks.length === 0) {
+          throw new Error("Duplicate failed: OmniFocus returned no new task");
+        }
         return JSON.stringify(serializeTask(newTasks[0]));
       })();
     `;

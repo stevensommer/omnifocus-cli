@@ -258,6 +258,15 @@ describe('duplicateTask script generation', () => {
     expect(scripts[0]).toContain('const position = findProject(\\"House\\").beginning;');
     expect(scripts[0]).toContain('duplicateTasks([task], position)');
   });
+
+  it('guards against an empty duplicateTasks result before serializing', async () => {
+    // duplicateTasks returning [] would make serializeTask(newTasks[0])
+    // dereference undefined and crash the serializer; a clear error is better.
+    const { of, scripts } = captureScript('{}');
+    await of.duplicateTask('t1');
+    expect(scripts[0]).toContain('if (!newTasks || newTasks.length === 0)');
+    expect(scripts[0]).toContain('Duplicate failed: OmniFocus returned no new task');
+  });
 });
 
 describe('parseTasks script generation', () => {
@@ -391,10 +400,23 @@ describe('serializer coverage', () => {
   it('serializeRepetition maps the 4.7 enums to strings', async () => {
     const { of, scripts } = captureScript('[]');
     await of.listTasks();
-    expect(scripts[0]).toContain('Task.RepetitionScheduleType.FromCompletion');
-    expect(scripts[0]).toContain('Task.AnchorDateKey.PlannedDate');
+    expect(scripts[0]).toContain('schedNS.FromCompletion');
+    expect(scripts[0]).toContain('anchorNS.PlannedDate');
     expect(scripts[0]).toContain('ruleString: rule.ruleString');
     expect(scripts[0]).toContain('catchUpAutomatically: rule.catchUpAutomatically');
+  });
+
+  it('serializeRepetition guards the 4.7 enum namespaces for older OmniFocus', async () => {
+    // Task.RepetitionScheduleType / Task.AnchorDateKey are undefined before
+    // OmniFocus 4.7; dereferencing them unguarded would throw for every
+    // repeating task and break list/get/search. The namespace must be
+    // captured and truthiness-checked before any enum member is read.
+    const { of, scripts } = captureScript('[]');
+    await of.listTasks();
+    expect(scripts[0]).toContain('const schedNS = Task.RepetitionScheduleType;');
+    expect(scripts[0]).toContain('const anchorNS = Task.AnchorDateKey;');
+    expect(scripts[0]).toContain('if (schedNS && rule.scheduleType === schedNS.FromCompletion)');
+    expect(scripts[0]).toContain('if (anchorNS && rule.anchorDateKey === anchorNS.DeferDate)');
   });
 
   it('serializeProject includes dates, flagged, nextTask, repetition, and url', async () => {
