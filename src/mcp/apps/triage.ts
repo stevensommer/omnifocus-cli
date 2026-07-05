@@ -236,6 +236,16 @@ export const TRIAGE_HTML = `<!doctype html>
     return node;
   }
 
+  // Find a rendered row by task id without a CSS selector (ids may contain
+  // characters that would need escaping in an attribute selector).
+  function findRowEl(id) {
+    var rows = root.querySelectorAll('.row');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-task-id') === id) return rows[i];
+    }
+    return null;
+  }
+
   function fmtDue(iso) {
     var d = new Date(iso);
     if (isNaN(d.getTime())) return '';
@@ -296,6 +306,60 @@ export const TRIAGE_HTML = `<!doctype html>
       });
   }
 
+  // Whether a task still belongs in the active filter given its current
+  // (optimistic) state. Completion is handled separately (always leaves); this
+  // covers the mutations that can push a row out of its filter: unflagging on
+  // the "flagged" filter, and deferring into the future on "actionable".
+  function matchesFilter(task) {
+    if (task.completed) return false;
+    switch (state.filter) {
+      case 'flagged':
+        return !!task.flagged;
+      case 'actionable':
+        // A future defer date makes the task non-actionable until then.
+        return !(task.deferredTo && new Date(task.deferredTo).getTime() > Date.now());
+      default:
+        // inbox / search membership is unaffected by flag or defer edits.
+        return true;
+    }
+  }
+
+  // Fade a row out, then drop it from the list. Decrements the running total so
+  // the header's "N of total" stays honest as rows leave (see renderApp).
+  function retireRow(task) {
+    task.leaving = true;
+    function drop() {
+      task.removed = true;
+      if (state.total > 0) state.total -= 1;
+      renderApp();
+    }
+    if (!motionOk) {
+      drop();
+      return;
+    }
+    // The row currently in the DOM was painted at opacity 1. Force a reflow,
+    // then add .leaving on the next frame so the CSS opacity transition runs
+    // instead of the row snapping to 0.
+    var row = findRowEl(task.id);
+    if (!row) {
+      drop();
+      return;
+    }
+    void row.getBoundingClientRect();
+    requestAnimationFrame(function () {
+      row.classList.add('leaving');
+      setTimeout(drop, 380);
+    });
+  }
+
+  // Re-evaluate a row after a successful non-completion mutation: if it no
+  // longer matches the active filter, retire it; otherwise just re-render.
+  function settleRow(task) {
+    task.pending = null;
+    if (matchesFilter(task)) renderApp();
+    else retireRow(task);
+  }
+
   function completeTask(task) {
     if (task.pending) return;
     task.pending = 'complete';
@@ -303,13 +367,8 @@ export const TRIAGE_HTML = `<!doctype html>
     renderApp();
     callUpdateTask(task, { completed: true }).then(function () {
       task.pending = null;
-      task.leaving = true;
-      renderApp();
       // Fade the row out after the call resolves, then drop it from the list.
-      setTimeout(function () {
-        task.removed = true;
-        renderApp();
-      }, motionOk ? 380 : 0);
+      retireRow(task);
     }).catch(function (err) {
       task.pending = null;
       task.completed = false;
@@ -325,8 +384,7 @@ export const TRIAGE_HTML = `<!doctype html>
     task.flagged = next;
     renderApp();
     callUpdateTask(task, { flagged: next }).then(function () {
-      task.pending = null;
-      renderApp();
+      settleRow(task);
     }).catch(function (err) {
       task.pending = null;
       task.flagged = !next;
@@ -342,8 +400,7 @@ export const TRIAGE_HTML = `<!doctype html>
     task.deferredTo = iso;
     renderApp();
     callUpdateTask(task, { defer: iso }).then(function () {
-      task.pending = null;
-      renderApp();
+      settleRow(task);
     }).catch(function (err) {
       task.pending = null;
       task.deferredTo = null;
@@ -355,7 +412,10 @@ export const TRIAGE_HTML = `<!doctype html>
   // ---------- main render ----------
 
   function buildRow(task) {
-    var row = el('div', 'row' + (task.completed ? ' done' : '') + (task.leaving ? ' leaving' : ''));
+    // Deliberately built WITHOUT the .leaving class even while leaving: the row
+    // must first paint at opacity 1 so adding .leaving on a later frame drives
+    // the opacity transition. retireRow adds the class post-render.
+    var row = el('div', 'row' + (task.completed ? ' done' : ''));
     row.setAttribute('data-task-id', task.id);
     var busy = !!task.pending;
 
@@ -462,7 +522,7 @@ export const TRIAGE_HTML = `<!doctype html>
         tags: Array.isArray(t.tags) ? t.tags.map(String) : [],
         due: t.effectiveDue || t.due || null,
         flagged: !!t.flagged,
-        completed: false,
+        completed: !!t.completed,
         deferredTo: null,
         pending: null,
         leaving: false,
@@ -510,6 +570,12 @@ export const TRIAGE_HTML = `<!doctype html>
   }
 
   window.addEventListener('message', function (event) {
+    // Only trust messages from our embedding host. The host origin is opaque
+    // (srcdoc/sandboxed iframes report a null/"*" origin) so an origin check is
+    // unreliable, but the source window is not spoofable: reject anything that
+    // did not come from window.parent. This matters because the widget issues
+    // update_task MUTATIONS in response to host messages.
+    if (event.source !== window.parent) return;
     var msg = event.data;
     if (!msg || msg.jsonrpc !== '2.0') return;
     // Response to one of our requests.

@@ -468,6 +468,59 @@ describe('triage HTML template', () => {
   it('stays within the inline size budget', () => {
     expect(Buffer.byteLength(TRIAGE_HTML, 'utf8')).toBeLessThan(60_000);
   });
+
+  it('re-evaluates filter membership after a mutation instead of leaving stale rows', () => {
+    // settleRow re-checks matchesFilter() after a successful flag/defer call
+    // and retires the row (fade + remove) when it no longer belongs, rather
+    // than leaving a now-mismatched row visible under the active filter.
+    expect(TRIAGE_HTML).toContain('function matchesFilter(task)');
+    expect(TRIAGE_HTML).toContain('function settleRow(task)');
+    expect(TRIAGE_HTML).toContain('if (matchesFilter(task)) renderApp();');
+    expect(TRIAGE_HTML).toContain('else retireRow(task);');
+    // Both mutations that can push a row out of its filter route through it.
+    expect(TRIAGE_HTML).toContain(
+      'callUpdateTask(task, { flagged: next }).then(function () {\n      settleRow(task);'
+    );
+    expect(TRIAGE_HTML).toContain(
+      'callUpdateTask(task, { defer: iso }).then(function () {\n      settleRow(task);'
+    );
+  });
+
+  it('keeps the header "N of total" honest by decrementing total as rows retire', () => {
+    // retireRow decrements state.total (not just the visible-rows count) so
+    // the header can't report more remaining tasks than actually exist once
+    // a row (completed, or filtered out by settleRow) leaves the list.
+    expect(TRIAGE_HTML).toContain('if (state.total > 0) state.total -= 1;');
+    expect(TRIAGE_HTML).toContain("visible.length + ' of ' + state.total + ' tasks'");
+  });
+
+  it('drives the completion fade with a forced reflow + rAF so the transition actually runs', () => {
+    // Rows are built without the .leaving class so they first paint at
+    // opacity 1; retireRow forces a reflow then adds .leaving on the next
+    // animation frame, which is what makes the CSS opacity transition fire
+    // instead of the row silently painting at its end state.
+    expect(TRIAGE_HTML).toContain('void row.getBoundingClientRect();');
+    expect(TRIAGE_HTML).toContain(
+      "requestAnimationFrame(function () {\n      row.classList.add('leaving');"
+    );
+    expect(TRIAGE_HTML).not.toContain("(task.leaving ? ' leaving' : '')");
+  });
+
+  it('reflects the real completed flag from the tool result instead of hard-coding false', () => {
+    expect(TRIAGE_HTML).toContain('completed: !!t.completed,');
+    expect(TRIAGE_HTML).not.toContain('completed: false,');
+  });
+
+  it('rejects postMessage events that do not originate from window.parent', () => {
+    // The widget issues update_task mutations in response to host messages,
+    // so a spoofed message from any window other than the true parent must
+    // be dropped before it can reach the JSON-RPC dispatch logic.
+    expect(TRIAGE_HTML).toContain('if (event.source !== window.parent) return;');
+    const listenerIdx = TRIAGE_HTML.indexOf("addEventListener('message'");
+    const guardIdx = TRIAGE_HTML.indexOf('event.source !== window.parent');
+    expect(listenerIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeGreaterThan(listenerIdx);
+  });
 });
 
 describe('triage_tasks tool registration', () => {
@@ -559,6 +612,26 @@ describe('triage_tasks handler', () => {
 
     const result = await findTool(tools, 'triage_tasks').handler({ filter: 'search' }, {});
     expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error).toMatchObject({
+      name: 'cli_error',
+      detail: 'filter "search" requires a query',
+      statusCode: 400,
+    });
+  });
+
+  it('returns the same 400 error when filter=search has a whitespace-only query', async () => {
+    const { of, calls } = makeStatsMockOf();
+    const { server, tools } = makeStubServer();
+    registerApps(server, of);
+
+    const result = await findTool(tools, 'triage_tasks').handler(
+      { filter: 'search', query: '   ' },
+      {}
+    );
+    expect(result.isError).toBe(true);
+    // searchTasks must never be reached with a blank query.
     expect(calls).toEqual([]);
     const body = JSON.parse((result.content[0] as { text: string }).text);
     expect(body.error).toMatchObject({

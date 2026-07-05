@@ -179,7 +179,7 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
             tasks = await of.listTasks({ flagged: true });
             break;
           case 'search':
-            if (!query) {
+            if (!query || !query.trim()) {
               throw new OmniFocusCliError('filter "search" requires a query', 400);
             }
             tasks = await of.searchTasks(query);
