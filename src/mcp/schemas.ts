@@ -128,7 +128,13 @@ export const TagSchema = z
     modified: isoDate.nullable(),
     lastActivity: isoDate.nullable(),
     active: z.boolean(),
-    status: z.enum(['active', 'on hold', 'dropped']),
+    // Tags share statusToString(status, Tag.Status) with projects. Live probes
+    // show Tag.Status has no Done member (all tags read 'active'|'on hold'|
+    // 'dropped'), so 'done' is currently unreachable for tags — but the shared
+    // serializer would emit it if a future OmniFocus added Tag.Status.Done, so
+    // 'done' is listed defensively to keep the schema a superset of the
+    // serializer's domain.
+    status: z.enum(['active', 'on hold', 'dropped', 'done']),
     parent: z.string().nullable(),
     children: z.array(z.string()),
     allowsNextAction: z.boolean(),

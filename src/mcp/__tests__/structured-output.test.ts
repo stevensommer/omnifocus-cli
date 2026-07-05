@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { OmniFocus } from '../../lib/omnifocus.js';
-import { FolderSchema, StatsDashboardSchema, TaskSchema, TriageResultSchema } from '../schemas.js';
-import { buildTools, structuredResponse, type ToolSpec } from '../server.js';
+import {
+  FolderSchema,
+  RepetitionSchema,
+  StatsDashboardSchema,
+  TagSchema,
+  TaskSchema,
+  TriageResultSchema,
+} from '../schemas.js';
+import { buildTools, structuredError, structuredResponse, type ToolSpec } from '../server.js';
 
 /**
  * Drift guard between the JXA serializers and the MCP output schemas.
@@ -328,6 +335,30 @@ describe('error results carry no structuredContent', () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();
   });
+
+  it('structuredError is the shared helper def() and the app tools both use', () => {
+    // apps.ts hand-rebuilt this shape before being pointed at the exported
+    // helper; pin the contract so it can't drift back apart.
+    const result = structuredError(new Error('Task not found: xyz'));
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
+      error: { name: 'omnifocus_error', detail: 'Task not found: xyz', statusCode: 404 },
+    });
+  });
+});
+
+describe('structuredResponse null/primitive guard', () => {
+  // Audited: every current handler resolves to an object or array (verified
+  // by the "every tool declares an outputSchema" + drift-guard suites above,
+  // which exercise all 46 catalogue tools). No live path hits this branch
+  // today, but wrapping defensively means a future primitive-returning
+  // handler degrades to {value: ...} instead of corrupting structuredContent.
+  it('wraps a primitive as {value} instead of casting it to an object', () => {
+    expect(structuredResponse('plain string').structuredContent).toEqual({ value: 'plain string' });
+    expect(structuredResponse(42).structuredContent).toEqual({ value: 42 });
+    expect(structuredResponse(null).structuredContent).toEqual({ value: null });
+  });
 });
 
 describe('schema strictness (mismatch guard)', () => {
@@ -353,6 +384,37 @@ describe('schema strictness (mismatch guard)', () => {
     expect(FolderSchema.safeParse(folderFixture).success).toBe(true);
     const bad = { ...folderFixture, children: [{ id: 'only-an-id' }] };
     expect(FolderSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("TagSchema accepts 'done', widened defensively beyond today's live enum", () => {
+    // Live-probed on OmniFocus 4.8.12: Tag.Status has no Done member today,
+    // so tagStatusToString(tag.status) can never actually emit 'done' for a
+    // tag. But it shares statusToString(status, StatusEnum) with
+    // projectStatusToString, which DOES emit 'done' — if a future OmniFocus
+    // adds Tag.Status.Done, the shared serializer would emit it too. Listed
+    // defensively so that day doesn't turn a successful read into isError.
+    expect(TagSchema.safeParse({ ...tagFixture, status: 'done' }).success).toBe(true);
+  });
+
+  it('RepetitionSchema requires ruleString/catchUpAutomatically because the serializer never omits them', () => {
+    // Live-probed on OmniFocus 4.8.12 against BOTH constructor forms:
+    // - modern 5-arg `new Task.RepetitionRule(rule, null, scheduleType,
+    //   anchorDateKey, catchUp)`
+    // - deprecated 2-arg `new Task.RepetitionRule(rule, RepetitionMethod)`
+    // Both populate ruleString (string) and catchUpAutomatically (boolean,
+    // defaults false) unconditionally, and scheduleType/anchorDateKey are
+    // always a real enum member — serializeRepetition's if/else chains
+    // default any unrecognised member to 'regularly'/'dueDate' rather than
+    // leaving the field undefined. So a schema requiring these fields
+    // matches the serializer's actual guarantee; loosening them to optional
+    // would only hide real drift. Enums are pinned to the three/three
+    // documented members for the same reason — OmniFocus does not expose a
+    // way to enumerate them for a forward-compat test, so this fixture
+    // stands in as the recorded evidence.
+    expect(RepetitionSchema.safeParse(repetitionFixture).success).toBe(true);
+    expect(
+      RepetitionSchema.safeParse({ ...repetitionFixture, ruleString: undefined }).success
+    ).toBe(false);
   });
 });
 

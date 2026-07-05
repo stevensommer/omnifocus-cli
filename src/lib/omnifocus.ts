@@ -1,4 +1,5 @@
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import { writeFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -401,7 +402,11 @@ export class OmniFocus {
     opts: { timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<string> {
     const { timeoutMs = 30000, signal } = opts;
-    const tmpFile = join(tmpdir(), `omnifocus-${Date.now()}.js`);
+    // A UUID (not Date.now()) keeps concurrent calls from colliding: e.g.
+    // get_stats_dashboard fires three executeJXA calls via Promise.all, and
+    // same-millisecond Date.now() names had them write/unlink the same temp
+    // file, corrupting one script into a random SyntaxError.
+    const tmpFile = join(tmpdir(), `omnifocus-${randomUUID()}.js`);
 
     try {
       await writeFile(tmpFile, script, 'utf-8');

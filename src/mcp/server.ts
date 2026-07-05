@@ -120,12 +120,35 @@ const DELETE: ToolAnnotations = {
  * results, so the error body stays free-form.
  */
 export function structuredResponse(data: unknown): CallToolResult {
-  const structuredContent = Array.isArray(data)
-    ? { items: data, count: data.length }
-    : (data as Record<string, unknown>);
+  // structuredContent must be a JSON object root. Arrays wrap as {items,count};
+  // a plain object passes through. Every current handler returns one of those,
+  // but a null/primitive would otherwise be cast to an object and break
+  // validation downstream, so wrap it as {value} defensively.
+  let structuredContent: Record<string, unknown>;
+  if (Array.isArray(data)) {
+    structuredContent = { items: data, count: data.length };
+  } else if (data !== null && typeof data === 'object') {
+    structuredContent = data as Record<string, unknown>;
+  } else {
+    structuredContent = { value: data };
+  }
   return {
     content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
     structuredContent,
+  };
+}
+
+/**
+ * Build the isError CallToolResult for a failed tool call (SEP-1303): the same
+ * structured error JSON the CLI emits, carried as text with isError set and no
+ * structuredContent (the SDK skips outputSchema validation for error results,
+ * so the error body stays free-form). Shared by def()'s catch and the app
+ * tools in apps.ts so every tool reports failures identically.
+ */
+export function structuredError(error: unknown): CallToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) }],
+    isError: true,
   };
 }
 
@@ -188,10 +211,7 @@ function def<S extends ZodRawShape>(
       return await handler(args as z.infer<z.ZodObject<S>>, extra);
     } catch (error) {
       if (error instanceof McpError) throw error;
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) }],
-        isError: true,
-      };
+      return structuredError(error);
     }
   };
   return { name, title, description, annotations, schema, outputSchema, handler: safeHandler };

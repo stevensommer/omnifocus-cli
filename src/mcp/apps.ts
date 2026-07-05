@@ -6,10 +6,11 @@ import {
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { classifyError, OmniFocusCliError } from '../lib/errors.js';
+import { OmniFocusCliError } from '../lib/errors.js';
 import type { OmniFocus } from '../lib/omnifocus.js';
 import type { Task } from '../types.js';
 import { StatsDashboardSchema, TriageResultSchema } from './schemas.js';
+import { structuredError, structuredResponse } from './server.js';
 import { STATS_DASHBOARD_HTML } from './apps/stats-dashboard.js';
 import { TRIAGE_HTML } from './apps/triage.js';
 
@@ -111,18 +112,11 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
           of.getTagStats(),
         ]);
         const combined = { tasks, projects, tags };
-        return {
-          content: [{ type: 'text', text: JSON.stringify(combined, null, 2) }],
-          structuredContent: combined,
-        };
+        // Object root, so structuredResponse passes it through unwrapped —
+        // exactly the { content, structuredContent } shape registerAppTool wants.
+        return structuredResponse(combined);
       } catch (error) {
-        // Same isError shape as the def() wrapper in server.ts (SEP-1303).
-        return {
-          content: [
-            { type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) },
-          ],
-          isError: true,
-        };
+        return structuredError(error);
       }
     }
   );
@@ -205,18 +199,10 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
           shown: shownTasks.length,
           tasks: shownTasks,
         };
-        return {
-          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
-          structuredContent: payload,
-        };
+        // Object root, so structuredResponse passes it through unwrapped.
+        return structuredResponse(payload);
       } catch (error) {
-        // Same isError shape as the def() wrapper in server.ts (SEP-1303).
-        return {
-          content: [
-            { type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) },
-          ],
-          isError: true,
-        };
+        return structuredError(error);
       }
     }
   );
