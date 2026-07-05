@@ -39,6 +39,14 @@ export class OmniFocus {
       return date ? date.toISOString() : null;
     }
 
+    // Preserve a genuine 0 (e.g. an explicit 0-minute estimate) instead of
+    // coercing it to null the way \`value || null\` would. OmniFocus emits a
+    // real number 0 when estimatedMinutes is set to 0, and null when unset
+    // (verified on OmniFocus 4.8.12), so only null/undefined should map to null.
+    function numberOrNull(value) {
+      return value != null ? value : null;
+    }
+
     // Permalink for any database object. DatabaseObject.url exists from
     // OmniFocus 4.5 but returns null for unsaved objects, so fall back to
     // the documented omnifocus:///<kind>/<primaryKey> template.
@@ -97,7 +105,7 @@ export class OmniFocus {
         planned: isoOrNull(task.plannedDate),
         effectiveDefer: isoOrNull(task.effectiveDeferDate),
         effectiveDue: isoOrNull(task.effectiveDueDate),
-        estimatedMinutes: task.estimatedMinutes || null,
+        estimatedMinutes: numberOrNull(task.estimatedMinutes),
         completionDate: isoOrNull(task.completionDate),
         dropDate: isoOrNull(task.dropDate),
         added: isoOrNull(task.added),
@@ -125,7 +133,7 @@ export class OmniFocus {
         due: isoOrNull(project.dueDate),
         completionDate: isoOrNull(project.completionDate),
         dropDate: isoOrNull(project.dropDate),
-        estimatedMinutes: project.estimatedMinutes || null,
+        estimatedMinutes: numberOrNull(project.estimatedMinutes),
         completedByChildren: project.completedByChildren,
         containsSingletonActions: project.containsSingletonActions,
         nextTask: nextTask ? { id: nextTask.id.primaryKey, name: nextTask.name } : null,
@@ -405,6 +413,14 @@ export class OmniFocus {
     if (!wantsCompleted) {
       conditions.push('if (task.completed) continue;');
     }
+    // effectiveActive semantics on OmniFocus 4.x: it is TRUE for both active
+    // AND completed tasks (verified live on 4.8.12 — completed tasks pass this
+    // guard), and FALSE only for DROPPED tasks. So this guard is the *dropped*
+    // filter, not a completed filter. Completed tasks are excluded solely by
+    // the `task.completed` guard above. Do NOT "fix" completed-task filters by
+    // touching this line — dropping it would leak dropped tasks into every
+    // default listing, and completed filters already work because completed
+    // tasks satisfy effectiveActive === true.
     if (!wantsDropped) {
       conditions.push('if (!task.effectiveActive) continue;');
     }
@@ -610,7 +626,7 @@ export class OmniFocus {
 
         ${options.note ? `task.note = "${this.escapeString(options.note)}";` : ''}
         ${options.flagged ? 'task.flagged = true;' : ''}
-        ${options.estimatedMinutes ? `task.estimatedMinutes = ${options.estimatedMinutes};` : ''}
+        ${options.estimatedMinutes != null ? `task.estimatedMinutes = ${options.estimatedMinutes};` : ''}
         ${options.defer ? `task.deferDate = new Date(${JSON.stringify(options.defer)});` : ''}
         ${options.due ? `task.dueDate = new Date(${JSON.stringify(options.due)});` : ''}
         ${options.planned ? `task.plannedDate = new Date(${JSON.stringify(options.planned)});` : ''}

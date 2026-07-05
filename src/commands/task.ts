@@ -3,6 +3,7 @@ import { outputJson } from '../lib/output.js';
 import { withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import { parseDateTime } from '../lib/dates.js';
+import { OmniFocusCliError } from '../lib/errors.js';
 import type { TaskFilters, TaskStatusFilter, UpdateTaskOptions } from '../types.js';
 
 const TASK_STATUS_FILTERS: TaskStatusFilter[] = [
@@ -16,9 +17,14 @@ const TASK_STATUS_FILTERS: TaskStatusFilter[] = [
   'dropped',
 ];
 
-function parseStatusFilter(value: string): TaskStatusFilter {
+export function parseStatusFilter(value: string): TaskStatusFilter {
   if (!(TASK_STATUS_FILTERS as string[]).includes(value)) {
-    throw new Error(`Invalid status "${value}". Valid: ${TASK_STATUS_FILTERS.join(', ')}`);
+    // Throw the structured 400 (matching isoDateArg's invalid-date handling)
+    // so a bad --status is classified as client error, not a generic 500.
+    throw new OmniFocusCliError(
+      `Invalid status "${value}". Valid: ${TASK_STATUS_FILTERS.join(', ')}`,
+      400
+    );
   }
   return value as TaskStatusFilter;
 }
