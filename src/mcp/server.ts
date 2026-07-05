@@ -1,8 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { z, type ZodRawShape } from 'zod';
-import { classifyError } from '../lib/errors.js';
+import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 
 /**
@@ -71,13 +74,16 @@ function def<S extends ZodRawShape>(
   schema: S,
   handler: (args: z.infer<z.ZodObject<S>>) => CallToolResult | Promise<CallToolResult>
 ): ToolSpec {
-  // Execution failures become isError tool results (per SEP-1303) carrying
-  // the same structured error JSON as the CLI, rather than protocol errors,
-  // so the calling model can read the failure and self-correct.
+  // Operational failures become isError tool results (per SEP-1303) carrying
+  // the same structured error JSON as the CLI, so the calling model can read
+  // the failure and self-correct. McpError is re-thrown untouched: it is the
+  // SDK's protocol-level signal (e.g. elicitation-required) and the SDK's own
+  // dispatcher special-cases it — wrapping it here would break that path.
   const safeHandler: ToolSpec['handler'] = async (args) => {
     try {
       return await handler(args as z.infer<z.ZodObject<S>>);
     } catch (error) {
+      if (error instanceof McpError) throw error;
       return {
         content: [{ type: 'text', text: JSON.stringify({ error: classifyError(error) }, null, 2) }],
         isError: true,
@@ -371,15 +377,19 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           ),
       },
       async ({ query }) => {
+        let pattern: RegExp;
         try {
-          const pattern = new RegExp(query, 'i');
-          const matches = tools
-            .filter((t) => pattern.test(t.name) || pattern.test(t.description))
-            .map((t) => ({ name: t.name, description: t.description }));
-          return jsonResponse({ tools: matches });
+          pattern = new RegExp(query, 'i');
         } catch {
-          return jsonResponse({ error: 'Invalid regex pattern' });
+          // Route through the shared error envelope so this failure honours the
+          // documented isError contract like every other tool, letting the
+          // model see it failed and retry with a valid pattern.
+          throw new OmniFocusCliError(`Invalid regex pattern: ${query}`, 400);
         }
+        const matches = tools
+          .filter((t) => pattern.test(t.name) || pattern.test(t.description))
+          .map((t) => ({ name: t.name, description: t.description }));
+        return jsonResponse({ tools: matches });
       }
     )
   );
@@ -388,10 +398,25 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
 }
 
 /**
- * Injected by tsup at build time; absent when the source runs directly under
- * vitest/bun, so guard with typeof rather than referencing it bare.
+ * The server version reported at initialize. tsup injects __VERSION__ at build
+ * time for the shipped binary; when running from source (vitest/bun, or any
+ * non-cli entry point where the define never ran) fall back to reading
+ * package.json rather than advertising a bogus sentinel for capability gating
+ * or telemetry. The '0.0.0-dev' sentinel remains only as a last resort if the
+ * package.json read itself fails.
  */
-const VERSION = typeof __VERSION__ !== 'undefined' ? __VERSION__ : '0.0.0-dev';
+function resolveVersion(): string {
+  if (typeof __VERSION__ !== 'undefined') return __VERSION__;
+  try {
+    const pkgUrl = new URL('../../package.json', import.meta.url);
+    const pkg = JSON.parse(readFileSync(fileURLToPath(pkgUrl), 'utf8')) as { version?: string };
+    return pkg.version ?? '0.0.0-dev';
+  } catch {
+    return '0.0.0-dev';
+  }
+}
+
+const VERSION = resolveVersion();
 
 /**
  * Sent to clients at initialize and injected into the model's context.

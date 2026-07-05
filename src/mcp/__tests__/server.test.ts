@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { buildTools, SERVER_INSTRUCTIONS, type ToolSpec } from '../server.js';
 import type { OmniFocus } from '../../lib/omnifocus.js';
 
@@ -197,10 +198,15 @@ describe('search_tools', () => {
     ]);
   });
 
-  it('reports invalid regex instead of throwing', async () => {
+  it('reports invalid regex through the isError envelope, not a bare success body', async () => {
+    // Must honour the same isError contract SERVER_INSTRUCTIONS documents for
+    // every other failure, so the model can tell the call failed.
     const tools = buildTools(makeMockOf().of);
-    const result = (await callTool(tools, 'search_tools', { query: '[' })) as { error?: string };
-    expect(result.error).toBe('Invalid regex pattern');
+    const result = await tool(tools, 'search_tools').handler({ query: '[' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse((result.content[0] as { text: string }).text);
+    expect(body.error.statusCode).toBe(400);
+    expect(body.error.detail).toContain('Invalid regex pattern');
   });
 });
 
@@ -275,6 +281,17 @@ describe('handler failures become isError tool results (SEP-1303)', () => {
     const tools = buildTools(of);
     const result = await tool(tools, 'get_inbox_count').handler({});
     expect(result.isError).toBeUndefined();
+  });
+
+  it('re-throws McpError so the SDK protocol path (e.g. elicitation) still works', async () => {
+    // McpError is the SDK's protocol-level signal; the SDK dispatcher
+    // special-cases it (createToolError skips it for UrlElicitationRequired).
+    // safeHandler must not swallow it into an isError result.
+    const { of } = makeMockOf({ getTask: new McpError(ErrorCode.InvalidRequest, 'protocol boom') });
+    const tools = buildTools(of);
+    await expect(tool(tools, 'get_task').handler({ idOrName: 'x' })).rejects.toBeInstanceOf(
+      McpError
+    );
   });
 });
 

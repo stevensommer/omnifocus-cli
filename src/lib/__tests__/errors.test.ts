@@ -46,10 +46,10 @@ switch (${JSON.stringify(scenario)}) {
     error = new OmniFocusCliError('bad request', 400);
     break;
   case 'error_not_found':
-    error = new Error('Task not found');
+    error = new Error('Task not found: abc');
     break;
   case 'error_multiple':
-    error = new Error('Multiple matches for "foo"');
+    error = new Error("Multiple tags found with name 'foo'");
     break;
   case 'error_plain':
     error = new Error('boom');
@@ -90,9 +90,20 @@ describe('classifyError', () => {
     });
   });
 
-  it('maps "not found" to 404 and "Multiple" to 400', () => {
-    expect(classifyError(new Error('Task not found')).statusCode).toBe(404);
-    expect(classifyError(new Error('Multiple matches for "foo"')).statusCode).toBe(400);
+  it('maps the find* sentinel shapes to 404 / 400', () => {
+    // Real messages from the JXA find* helpers: "<Type> not found: <id>" and
+    // "Multiple <type> found with name ...".
+    expect(classifyError(new Error('Task not found: kXu3B-LZfFH')).statusCode).toBe(404);
+    expect(
+      classifyError(new Error("Multiple tags found with name 'foo'. Please use full path"))
+        .statusCode
+    ).toBe(400);
+  });
+
+  it('does NOT miscode unrelated errors that merely contain the words', () => {
+    // The reviewer's false-positive cases: loose substrings must not trigger.
+    expect(classifyError(new Error('Application not found')).statusCode).toBe(500);
+    expect(classifyError(new Error('Multiple windows open')).statusCode).toBe(500);
   });
 
   it('defaults plain errors to 500 and non-errors to unknown_error', () => {
@@ -138,7 +149,7 @@ describe('handleError', () => {
   it('maps "not found" errors to 404', async () => {
     const { stdout } = await runHandleError('error_not_found');
     expect(JSON.parse(stdout)).toEqual({
-      error: { name: 'omnifocus_error', detail: 'Task not found', statusCode: 404 },
+      error: { name: 'omnifocus_error', detail: 'Task not found: abc', statusCode: 404 },
     });
   });
 
@@ -147,7 +158,7 @@ describe('handleError', () => {
     expect(JSON.parse(stdout)).toEqual({
       error: {
         name: 'omnifocus_error',
-        detail: 'Multiple matches for "foo"',
+        detail: "Multiple tags found with name 'foo'",
         statusCode: 400,
       },
     });

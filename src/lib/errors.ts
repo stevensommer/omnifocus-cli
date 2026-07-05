@@ -26,10 +26,17 @@ export function classifyError(error: unknown): ErrorInfo {
     return { name: 'cli_error', detail: error.message, statusCode: error.statusCode };
   }
   if (error instanceof Error) {
+    // Classify on this codebase's own sentinel error shapes, not loose
+    // substrings — these results now feed the MCP client (a 404 steers the
+    // model to retry lookups), so an unrelated JXA/AppleScript message that
+    // merely contains "not found" or "Multiple" must NOT be miscoded.
+    // The find* helpers throw "<Type> not found: <idOrName>" and
+    // "Multiple <type> found with name ...". We can't use typed errors here
+    // because these originate as strings across the osascript boundary.
     let statusCode = 500;
-    if (error.message.includes('not found')) {
+    if (/not found:\s/.test(error.message)) {
       statusCode = 404;
-    } else if (error.message.includes('Multiple')) {
+    } else if (/Multiple\b.*\bfound\b/.test(error.message)) {
       statusCode = 400;
     }
     return { name: 'omnifocus_error', detail: error.message, statusCode };
