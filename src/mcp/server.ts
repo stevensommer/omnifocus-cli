@@ -4,10 +4,29 @@ import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { z, type ZodRawShape } from 'zod';
+import { z, type ZodRawShape, type ZodTypeAny } from 'zod';
 import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import { APP_TOOL_DESCRIPTORS, registerApps } from './apps.js';
+import {
+  BatchUpdateResultSchema,
+  CleanupInboxResultSchema,
+  CountSchema,
+  DeletedSchema,
+  FolderSchema,
+  listOf,
+  PerspectiveSchema,
+  ProjectSchema,
+  ProjectStatsSchema,
+  RedoneSchema,
+  SavedSchema,
+  SearchToolsResultSchema,
+  TagSchema,
+  TagStatsSchema,
+  TaskSchema,
+  TaskStatsSchema,
+  UndoneSchema,
+} from './schemas.js';
 
 /**
  * A single MCP tool definition. `buildTools()` returns these as the one source
@@ -40,6 +59,14 @@ export interface ToolSpec {
   description: string;
   annotations: ToolAnnotations;
   schema: ZodRawShape;
+  /**
+   * Zod object schema for the tool's structuredContent (MCP outputSchema).
+   * A full ZodObject (not a raw shape) so `.passthrough()` survives into the
+   * advertised JSON schema as `additionalProperties: true` — the serializers
+   * may gain fields without breaking strict clients. The SDK validates every
+   * non-error structuredContent against this at runtime.
+   */
+  outputSchema: ZodTypeAny;
   handler: (
     args: Record<string, unknown>,
     extra?: ToolCallExtra
@@ -80,8 +107,26 @@ const DELETE: ToolAnnotations = {
   openWorldHint: false,
 };
 
-function jsonResponse(data: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+/**
+ * Build a successful CallToolResult carrying both content forms:
+ * - `content`: the same pretty-printed JSON the tool has always returned
+ *   (arrays stay raw arrays here, for backwards compatibility);
+ * - `structuredContent`: the machine-readable copy validated against the
+ *   tool's outputSchema. The MCP spec requires an *object* root, so array
+ *   results are wrapped as { items, count } (see listOf in schemas.ts).
+ *
+ * Error results are built in def()'s catch instead and never carry
+ * structuredContent — the SDK skips outputSchema validation for isError
+ * results, so the error body stays free-form.
+ */
+export function structuredResponse(data: unknown): CallToolResult {
+  const structuredContent = Array.isArray(data)
+    ? { items: data, count: data.length }
+    : (data as Record<string, unknown>);
+  return {
+    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+    structuredContent,
+  };
 }
 
 /**
@@ -116,7 +161,8 @@ export function startProgressHeartbeat(
 /**
  * Define a tool while preserving per-tool argument inference: the `handler`
  * sees arguments typed from its own `schema`, even though the returned specs
- * are collected into a single heterogeneous array.
+ * are collected into a single heterogeneous array. `outputSchema` describes
+ * the structuredContent of successful results (see ToolSpec.outputSchema).
  */
 function def<S extends ZodRawShape>(
   name: string,
@@ -124,6 +170,7 @@ function def<S extends ZodRawShape>(
   description: string,
   annotations: ToolAnnotations,
   schema: S,
+  outputSchema: ZodTypeAny,
   handler: (
     args: z.infer<z.ZodObject<S>>,
     extra?: ToolCallExtra
@@ -134,6 +181,8 @@ function def<S extends ZodRawShape>(
   // the failure and self-correct. McpError is re-thrown untouched: it is the
   // SDK's protocol-level signal (e.g. elicitation-required) and the SDK's own
   // dispatcher special-cases it — wrapping it here would break that path.
+  // isError results deliberately omit structuredContent: the SDK only skips
+  // outputSchema validation for error results.
   const safeHandler: ToolSpec['handler'] = async (args, extra) => {
     try {
       return await handler(args as z.infer<z.ZodObject<S>>, extra);
@@ -145,7 +194,7 @@ function def<S extends ZodRawShape>(
       };
     }
   };
-  return { name, title, description, annotations, schema, handler: safeHandler };
+  return { name, title, description, annotations, schema, outputSchema, handler: safeHandler };
 }
 
 /**
@@ -198,7 +247,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         addedBefore: z.string().optional().describe('Created before (ISO 8601)'),
         addedAfter: z.string().optional().describe('Created after (ISO 8601)'),
       },
-      async (filters) => jsonResponse(await of.listTasks(filters))
+      listOf(TaskSchema),
+      async (filters) => structuredResponse(await of.listTasks(filters))
     ),
     def(
       'get_task',
@@ -212,8 +262,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Include one level of serialized child tasks as "children"'),
       },
+      TaskSchema,
       async ({ idOrName, includeChildren }) =>
-        jsonResponse(await of.getTask(idOrName, { includeChildren }))
+        structuredResponse(await of.getTask(idOrName, { includeChildren }))
     ),
     def(
       'create_task',
@@ -237,7 +288,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         flagged: z.boolean().optional().describe('Flag the task'),
         estimatedMinutes: z.number().optional().describe('Estimated duration in minutes'),
       },
-      async (options) => jsonResponse(await of.createTask(options))
+      TaskSchema,
+      async (options) => structuredResponse(await of.createTask(options))
     ),
     def(
       'update_task',
@@ -269,7 +321,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Auto-complete the task when its last child completes'),
       },
-      async ({ idOrName, ...options }) => jsonResponse(await of.updateTask(idOrName, options))
+      TaskSchema,
+      async ({ idOrName, ...options }) => structuredResponse(await of.updateTask(idOrName, options))
     ),
     def(
       'set_task_repeat',
@@ -296,7 +349,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .describe('Skip past occurrences when resolving (regularly-repeating items only)'),
         clear: z.boolean().optional().describe('Remove the repetition rule instead'),
       },
-      async ({ idOrName, ...options }) => jsonResponse(await of.setTaskRepeat(idOrName, options))
+      TaskSchema,
+      async ({ idOrName, ...options }) =>
+        structuredResponse(await of.setTaskRepeat(idOrName, options))
     ),
     def(
       'move_task',
@@ -327,8 +382,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
             'Where to place the task: beginning/end of the destination, or before/after a sibling task'
           ),
       },
+      TaskSchema,
       async ({ idOrName, to, position }) =>
-        jsonResponse(await of.moveTask(idOrName, { ...to, position }))
+        structuredResponse(await of.moveTask(idOrName, { ...to, position }))
     ),
     def(
       'duplicate_task',
@@ -356,8 +412,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
             'Where to place the copy: beginning/end of the destination, or before/after a sibling task'
           ),
       },
+      TaskSchema,
       async ({ idOrName, to, position }) =>
-        jsonResponse(await of.duplicateTask(idOrName, { ...to, position }))
+        structuredResponse(await of.duplicateTask(idOrName, { ...to, position }))
     ),
     def(
       'parse_tasks',
@@ -371,7 +428,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Move the created tasks into this project (ID or name)'),
       },
-      async ({ text, project }) => jsonResponse(await of.parseTasks(text, { project }))
+      listOf(TaskSchema),
+      async ({ text, project }) => structuredResponse(await of.parseTasks(text, { project }))
     ),
     def(
       'drop_task',
@@ -385,8 +443,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Also stop future repeats of a repeating task (default false)'),
       },
+      TaskSchema,
       async ({ idOrName, allOccurrences }) =>
-        jsonResponse(await of.dropTask(idOrName, { allOccurrences }))
+        structuredResponse(await of.dropTask(idOrName, { allOccurrences }))
     ),
     def(
       'delete_task',
@@ -394,9 +453,10 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Delete a task',
       DELETE,
       { idOrName: z.string().describe('Task ID or name') },
+      DeletedSchema,
       async ({ idOrName }) => {
         await of.deleteTask(idOrName);
-        return jsonResponse({ deleted: true });
+        return structuredResponse({ deleted: true });
       }
     ),
     def(
@@ -432,7 +492,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Shift the planned date of each task by N days (may be negative)'),
       },
-      async ({ ids, ...options }) => jsonResponse(await of.updateTasks(ids, options))
+      listOf(BatchUpdateResultSchema),
+      async ({ ids, ...options }) => structuredResponse(await of.updateTasks(ids, options))
     ),
     def(
       'convert_task_to_project',
@@ -443,8 +504,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         idOrName: z.string().describe('Task ID or name'),
         folder: z.string().optional().describe('Destination folder ID or name'),
       },
+      ProjectSchema,
       async ({ idOrName, folder }) =>
-        jsonResponse(await of.convertTaskToProject(idOrName, { folder }))
+        structuredResponse(await of.convertTaskToProject(idOrName, { folder }))
     ),
     def(
       'search_tasks',
@@ -452,16 +514,35 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Search tasks by name or note content',
       READ,
       { query: z.string().describe('Search query') },
-      async ({ query }) => jsonResponse(await of.searchTasks(query))
+      listOf(TaskSchema),
+      async ({ query }) => structuredResponse(await of.searchTasks(query))
     ),
-    def('get_task_stats', 'Get task statistics', 'Get task statistics', READ, {}, async () =>
-      jsonResponse(await of.getTaskStats())
+    def(
+      'get_task_stats',
+      'Get task statistics',
+      'Get task statistics',
+      READ,
+      {},
+      TaskStatsSchema,
+      async () => structuredResponse(await of.getTaskStats())
     ),
-    def('list_inbox', 'List inbox tasks', 'List all inbox tasks', READ, {}, async () =>
-      jsonResponse(await of.listInboxTasks())
+    def(
+      'list_inbox',
+      'List inbox tasks',
+      'List all inbox tasks',
+      READ,
+      {},
+      listOf(TaskSchema),
+      async () => structuredResponse(await of.listInboxTasks())
     ),
-    def('get_inbox_count', 'Get inbox count', 'Get the number of inbox tasks', READ, {}, async () =>
-      jsonResponse({ count: await of.getInboxCount() })
+    def(
+      'get_inbox_count',
+      'Get inbox count',
+      'Get the number of inbox tasks',
+      READ,
+      {},
+      CountSchema,
+      async () => structuredResponse({ count: await of.getInboxCount() })
     ),
     def(
       'cleanup_inbox',
@@ -474,7 +555,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Project ID or name to assign unassigned inbox tasks to before cleanup'),
       },
-      async ({ container }) => jsonResponse(await of.cleanupInbox({ container }))
+      CleanupInboxResultSchema,
+      async ({ container }) => structuredResponse(await of.cleanupInbox({ container }))
     ),
     def(
       'list_projects',
@@ -486,7 +568,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('Filter by status'),
         folder: z.string().optional().describe('Filter by folder name'),
       },
-      async (filters) => jsonResponse(await of.listProjects(filters))
+      listOf(ProjectSchema),
+      async (filters) => structuredResponse(await of.listProjects(filters))
     ),
     def(
       'get_project',
@@ -494,7 +577,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Get a specific project by ID or name',
       READ,
       { idOrName: z.string().describe('Project ID or name') },
-      async ({ idOrName }) => jsonResponse(await of.getProject(idOrName))
+      ProjectSchema,
+      async ({ idOrName }) => structuredResponse(await of.getProject(idOrName))
     ),
     def(
       'create_project',
@@ -516,7 +600,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Review interval, e.g. "1 week" or "2 months"'),
       },
-      async (options) => jsonResponse(await of.createProject(options))
+      ProjectSchema,
+      async (options) => structuredResponse(await of.createProject(options))
     ),
     def(
       'update_project',
@@ -536,7 +621,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           .optional()
           .describe('Review interval, e.g. "1 week" or "2 months"'),
       },
-      async ({ idOrName, ...options }) => jsonResponse(await of.updateProject(idOrName, options))
+      ProjectSchema,
+      async ({ idOrName, ...options }) =>
+        structuredResponse(await of.updateProject(idOrName, options))
     ),
     def(
       'complete_project',
@@ -548,8 +635,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         date: z.string().optional().describe('Completion date (ISO 8601, defaults to now)'),
         incomplete: z.boolean().optional().describe('Mark the project incomplete instead'),
       },
+      ProjectSchema,
       async ({ idOrName, date, incomplete }) =>
-        jsonResponse(await of.completeProject(idOrName, { date, incomplete }))
+        structuredResponse(await of.completeProject(idOrName, { date, incomplete }))
     ),
     def(
       'list_projects_due_for_review',
@@ -557,7 +645,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'List projects whose next review date has passed (headless; excludes dropped and completed projects)',
       READ,
       {},
-      async () => jsonResponse(await of.listProjectsDueForReview())
+      listOf(ProjectSchema),
+      async () => structuredResponse(await of.listProjectsDueForReview())
     ),
     def(
       'mark_project_reviewed',
@@ -565,7 +654,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Mark a project as reviewed now; OmniFocus reschedules its next review from the review interval',
       UPDATE,
       { idOrName: z.string().describe('Project ID or name') },
-      async ({ idOrName }) => jsonResponse(await of.markProjectReviewed(idOrName))
+      ProjectSchema,
+      async ({ idOrName }) => structuredResponse(await of.markProjectReviewed(idOrName))
     ),
     def(
       'search_projects',
@@ -573,7 +663,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Fuzzy-search projects using OmniFocus Quick Open matching',
       READ,
       { query: z.string().describe('Search query') },
-      async ({ query }) => jsonResponse(await of.searchProjects(query))
+      listOf(ProjectSchema),
+      async ({ query }) => structuredResponse(await of.searchProjects(query))
     ),
     def(
       'delete_project',
@@ -581,9 +672,10 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Delete a project',
       DELETE,
       { idOrName: z.string().describe('Project ID or name') },
+      DeletedSchema,
       async ({ idOrName }) => {
         await of.deleteProject(idOrName);
-        return jsonResponse({ deleted: true });
+        return structuredResponse({ deleted: true });
       }
     ),
     def(
@@ -592,7 +684,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Get project statistics',
       READ,
       {},
-      async () => jsonResponse(await of.getProjectStats())
+      ProjectStatsSchema,
+      async () => structuredResponse(await of.getProjectStats())
     ),
     def(
       'list_perspectives',
@@ -600,7 +693,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'List all available perspectives',
       READ,
       {},
-      async () => jsonResponse(await of.listPerspectives())
+      listOf(PerspectiveSchema),
+      async () => structuredResponse(await of.listPerspectives())
     ),
     // Read-only for OmniFocus data, though it does switch the frontmost
     // window's perspective as a side effect of traversing the content tree.
@@ -612,6 +706,7 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       {
         name: z.string().describe('Perspective name (e.g., Inbox, Flagged, or custom perspective)'),
       },
+      listOf(TaskSchema),
       async ({ name }, extra) => {
         // Perspective traversal can run up to 60s: emit progress heartbeats
         // (when the client sent a token) and abort osascript on cancellation.
@@ -620,7 +715,7 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           `Reading perspective "${name}" in OmniFocus`
         );
         try {
-          return jsonResponse(await of.getPerspectiveTasks(name, { signal: extra?.signal }));
+          return structuredResponse(await of.getPerspectiveTasks(name, { signal: extra?.signal }));
         } finally {
           stopHeartbeat();
         }
@@ -636,7 +731,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         sortBy: z.enum(['name', 'usage', 'activity']).optional().describe('Sort order'),
         activeOnly: z.boolean().optional().describe('Only count active tasks'),
       },
-      async (options) => jsonResponse(await of.listTags(options))
+      listOf(TagSchema),
+      async (options) => structuredResponse(await of.listTags(options))
     ),
     def(
       'get_tag',
@@ -644,7 +740,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Get a specific tag by ID or name',
       READ,
       { idOrName: z.string().describe('Tag ID, name, or path (e.g., "Parent/Child")') },
-      async ({ idOrName }) => jsonResponse(await of.getTag(idOrName))
+      TagSchema,
+      async ({ idOrName }) => structuredResponse(await of.getTag(idOrName))
     ),
     def(
       'create_tag',
@@ -656,7 +753,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         parent: z.string().optional().describe('Parent tag name or path'),
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('Initial status'),
       },
-      async (options) => jsonResponse(await of.createTag(options))
+      TagSchema,
+      async (options) => structuredResponse(await of.createTag(options))
     ),
     def(
       'update_tag',
@@ -668,7 +766,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         name: z.string().optional().describe('New tag name'),
         status: z.enum(['active', 'on hold', 'dropped']).optional().describe('New status'),
       },
-      async ({ idOrName, ...options }) => jsonResponse(await of.updateTag(idOrName, options))
+      TagSchema,
+      async ({ idOrName, ...options }) => structuredResponse(await of.updateTag(idOrName, options))
     ),
     def(
       'delete_tag',
@@ -676,13 +775,20 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Delete a tag',
       DELETE,
       { idOrName: z.string().describe('Tag ID, name, or path') },
+      DeletedSchema,
       async ({ idOrName }) => {
         await of.deleteTag(idOrName);
-        return jsonResponse({ deleted: true });
+        return structuredResponse({ deleted: true });
       }
     ),
-    def('get_tag_stats', 'Get tag statistics', 'Get tag statistics', READ, {}, async () =>
-      jsonResponse(await of.getTagStats())
+    def(
+      'get_tag_stats',
+      'Get tag statistics',
+      'Get tag statistics',
+      READ,
+      {},
+      TagStatsSchema,
+      async () => structuredResponse(await of.getTagStats())
     ),
     def(
       'search_tags',
@@ -690,7 +796,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Fuzzy-search tags using OmniFocus Quick Open matching',
       READ,
       { query: z.string().describe('Search query') },
-      async ({ query }) => jsonResponse(await of.searchTags(query))
+      listOf(TagSchema),
+      async ({ query }) => structuredResponse(await of.searchTags(query))
     ),
     def(
       'list_folders',
@@ -698,7 +805,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'List all folders',
       READ,
       { includeDropped: z.boolean().optional().describe('Include dropped folders') },
-      async (filters) => jsonResponse(await of.listFolders(filters))
+      listOf(FolderSchema),
+      async (filters) => structuredResponse(await of.listFolders(filters))
     ),
     def(
       'get_folder',
@@ -709,8 +817,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         idOrName: z.string().describe('Folder ID or name'),
         includeDropped: z.boolean().optional().describe('Include dropped children'),
       },
+      FolderSchema,
       async ({ idOrName, includeDropped }) =>
-        jsonResponse(await of.getFolder(idOrName, { includeDropped }))
+        structuredResponse(await of.getFolder(idOrName, { includeDropped }))
     ),
     def(
       'create_folder',
@@ -721,7 +830,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         name: z.string().describe('Folder name'),
         parent: z.string().optional().describe('Parent folder ID or name'),
       },
-      async (options) => jsonResponse(await of.createFolder(options))
+      FolderSchema,
+      async (options) => structuredResponse(await of.createFolder(options))
     ),
     def(
       'update_folder',
@@ -734,7 +844,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         status: z.enum(['active', 'dropped']).optional().describe('New status'),
         parent: z.string().optional().describe('Move into this parent folder'),
       },
-      async ({ idOrName, ...options }) => jsonResponse(await of.updateFolder(idOrName, options))
+      FolderSchema,
+      async ({ idOrName, ...options }) =>
+        structuredResponse(await of.updateFolder(idOrName, options))
     ),
     def(
       'delete_folder',
@@ -742,9 +854,10 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Delete a folder',
       DELETE,
       { idOrName: z.string().describe('Folder ID or name') },
+      DeletedSchema,
       async ({ idOrName }) => {
         await of.deleteFolder(idOrName);
-        return jsonResponse({ deleted: true });
+        return structuredResponse({ deleted: true });
       }
     ),
     def(
@@ -753,7 +866,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Fuzzy-search folders using OmniFocus Quick Open matching',
       READ,
       { query: z.string().describe('Search query') },
-      async ({ query }) => jsonResponse(await of.searchFolders(query))
+      listOf(FolderSchema),
+      async ({ query }) => structuredResponse(await of.searchFolders(query))
     ),
     def(
       'undo',
@@ -761,7 +875,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Undo the last change in the OmniFocus database. Errors when there is nothing to undo. Undo granularity is OmniFocus action grouping: one tool call is typically one undo group.',
       UPDATE,
       {},
-      async () => jsonResponse(await of.undo())
+      UndoneSchema,
+      async () => structuredResponse(await of.undo())
     ),
     def(
       'redo',
@@ -769,7 +884,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Redo the last undone change in the OmniFocus database. Errors when there is nothing to redo.',
       UPDATE,
       {},
-      async () => jsonResponse(await of.redo())
+      RedoneSchema,
+      async () => structuredResponse(await of.redo())
     ),
     def(
       'sync_now',
@@ -777,7 +893,8 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
       'Save the OmniFocus database, which triggers a sync when sync is enabled',
       CREATE,
       {},
-      async () => jsonResponse(await of.syncNow())
+      SavedSchema,
+      async () => structuredResponse(await of.syncNow())
     ),
   ];
 
@@ -796,6 +913,7 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
             'Regex pattern to match against tool names and descriptions (case-insensitive)'
           ),
       },
+      SearchToolsResultSchema,
       async ({ query }) => {
         let pattern: RegExp;
         try {
@@ -817,7 +935,7 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
         const matches = searchable.filter(
           (t) => pattern.test(t.name) || pattern.test(t.description)
         );
-        return jsonResponse({ tools: matches });
+        return structuredResponse({ tools: matches });
       }
     )
   );
@@ -856,8 +974,9 @@ export const SERVER_INSTRUCTIONS = `CLI-backed MCP server for OmniFocus on macOS
 - Tools taking "idOrName" accept a primary key ID (e.g. "kXu3B-LZfFH") or an exact name. IDs are unambiguous and preferred — get them from the list/search tools first.
 - Dates are ISO 8601 strings: "YYYY-MM-DD" or a full timestamp like "2026-07-04T10:00:00". Returned dates are ISO strings.
 - Tag names may be hierarchical paths like "Parent/Child".
+- Every tool declares an outputSchema and returns structuredContent. List tools wrap their arrays as {items, count} in structuredContent (the spec requires an object root); the text content block keeps the raw pretty-printed JSON, so arrays stay arrays there.
 - get_perspective_tasks requires an OmniFocus window to be open, may take up to 60 seconds, and switches the visible perspective as a side effect. Other tools are headless.
-- Failed calls return a JSON body {"error": {"name", "detail", "statusCode"}} with isError set; a 404 usually means the idOrName didn't match anything.
+- Failed calls return a JSON body {"error": {"name", "detail", "statusCode"}} with isError set (and no structuredContent); a 404 usually means the idOrName didn't match anything.
 - Prefer update_tasks over repeated update_task calls when changing several tasks: it runs in one round trip and returns per-id {id, ok, error?} results instead of failing the whole batch.
 - undo/redo revert whole tool calls (OmniFocus groups each script into one undo step) — a safety valve after a bad batch update.
 - Use search_tools (case-insensitive regex over tool names/descriptions) to discover capabilities.`;
@@ -882,6 +1001,7 @@ export async function runMcpServer() {
         title: tool.title,
         description: tool.description,
         inputSchema: tool.schema,
+        outputSchema: tool.outputSchema,
         // Duplicate the title into annotations for clients that predate the
         // top-level `title` field and fall back to `annotations.title`.
         annotations: { title: tool.title, ...tool.annotations },

@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import type { OmniFocus } from '../lib/omnifocus.js';
 import type { Task } from '../types.js';
+import { StatsDashboardSchema, TriageResultSchema } from './schemas.js';
 import { STATS_DASHBOARD_HTML } from './apps/stats-dashboard.js';
 import { TRIAGE_HTML } from './apps/triage.js';
 
@@ -85,6 +86,10 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
       title: 'Stats dashboard',
       description: GET_STATS_DASHBOARD_DESCRIPTION,
       inputSchema: {},
+      // Raw shape rather than the ZodObject: registerAppTool's OutputArgs
+      // accepts ZodRawShapeCompat | StandardSchemaWithJSON, and zod 3 only
+      // satisfies the latter's validate half, not its jsonSchema half.
+      outputSchema: StatsDashboardSchema.shape,
       // Mirrors the READ preset in server.ts (title duplicated into
       // annotations for clients that predate the top-level title field).
       annotations: {
@@ -160,6 +165,8 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
           .optional()
           .describe('Maximum number of tasks to return (default 50)'),
       },
+      // Raw shape for the same ZodRawShapeCompat reason as get_stats_dashboard.
+      outputSchema: TriageResultSchema.shape,
       // Mirrors the READ preset in server.ts: this tool only reads; the
       // widget's mutations go through the existing update_task tool.
       annotations: {

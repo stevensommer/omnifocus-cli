@@ -209,6 +209,16 @@ Every tool returns the same JSON shape as its CLI counterpart. `search_tools` ta
 
 Each tool also declares a human-readable title and [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), so clients like Claude Desktop can display friendly names and group tools into read-only vs write/delete categories instead of listing them all under "Other tools".
 
+#### Structured output
+
+Every tool declares an [`outputSchema`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#structured-content) and returns `structuredContent` alongside the usual text block:
+
+- Object results (a task, a project, `{count}`, stats, …) appear in `structuredContent` as-is.
+- Array results are wrapped as `{ "items": [...], "count": n }`, because the spec requires an object root for `structuredContent`. The text content block keeps the raw pretty-printed array, so existing consumers of the text form see no change.
+- Failed calls (`isError`) carry only the JSON error text and never `structuredContent`.
+
+The schemas mirror the CLI's JSON output field for field and allow additional properties, so new fields can be added without breaking strict clients. Note: Claude Code versions affected by [anthropics/claude-code#25081](https://github.com/anthropics/claude-code/issues/25081) dropped tools that declare `outputSchema` from `tools/list`; update Claude Code if tools appear missing.
+
 ## JSON Output
 
 All commands output JSON. Use `--compact` for single-line output.
