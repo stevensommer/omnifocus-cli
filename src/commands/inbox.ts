@@ -56,5 +56,17 @@ export function createInboxCommand(): Command {
       })
     );
 
+  command
+    .command('clean')
+    .description('File inbox tasks: optionally assign a default project, then run cleanup')
+    .option('-p, --project <idOrName>', 'Assign unassigned inbox tasks to this project first')
+    .action(
+      withErrorHandling(async (options) => {
+        const of = new OmniFocus();
+        const result = await of.cleanupInbox({ container: options.project });
+        outputJson(result);
+      })
+    );
+
   return command;
 }

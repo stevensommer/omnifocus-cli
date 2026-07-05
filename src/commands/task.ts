@@ -4,7 +4,12 @@ import { withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import { parseDateTime } from '../lib/dates.js';
 import { OmniFocusCliError } from '../lib/errors.js';
-import type { TaskFilters, TaskStatusFilter, UpdateTaskOptions } from '../types.js';
+import type {
+  TaskFilters,
+  TaskStatusFilter,
+  UpdateTaskOptions,
+  UpdateTasksOptions,
+} from '../types.js';
 
 const TASK_STATUS_FILTERS: TaskStatusFilter[] = [
   'actionable',
@@ -27,6 +32,23 @@ export function parseStatusFilter(value: string): TaskStatusFilter {
     );
   }
   return value as TaskStatusFilter;
+}
+
+/**
+ * Reject a pair of opposite boolean flags (--complete/--incomplete,
+ * --flag/--unflag) when both are given: silently letting object-spread
+ * order pick a winner means the "loses" flag does something invisible to
+ * the caller. Called from the action handler so withErrorHandling turns
+ * this into a clean JSON 400.
+ */
+function rejectConflictingFlags(
+  pairs: Array<[boolean | undefined, boolean | undefined, string, string]>
+): void {
+  for (const [a, b, aName, bName] of pairs) {
+    if (a && b) {
+      throw new OmniFocusCliError(`Cannot combine ${aName} and ${bName}`, 400);
+    }
+  }
 }
 
 export function createTaskCommand(): Command {
@@ -129,6 +151,10 @@ export function createTaskCommand(): Command {
     .option('-e, --estimate <minutes>', 'Estimated time in minutes', parseInt)
     .action(
       withErrorHandling(async (idOrName, options) => {
+        rejectConflictingFlags([
+          [options.flag, options.unflag, '--flag', '--unflag'],
+          [options.complete, options.incomplete, '--complete', '--incomplete'],
+        ]);
         const of = new OmniFocus();
         const updates: UpdateTaskOptions = {
           ...(options.name && { name: options.name }),
@@ -152,6 +178,75 @@ export function createTaskCommand(): Command {
         };
         const task = await of.updateTask(idOrName, updates);
         outputJson(task);
+      })
+    );
+
+  command
+    .command('update-many <idOrNames...>')
+    .description('Apply the same updates to many tasks in one OmniFocus round trip')
+    .option('-n, --name <name>', 'New name (applied to every task)')
+    .option('--note <text>', 'New note')
+    .option('-p, --project <name>', 'Move to project')
+    .option('-t, --tag <tags...>', 'Replace tags')
+    .option('-d, --due <date>', 'Set due date')
+    .option('-D, --defer <date>', 'Set defer date')
+    .option('-P, --planned <date>', 'Set planned date')
+    .option('-f, --flag', 'Flag the tasks')
+    .option('-F, --unflag', 'Unflag the tasks')
+    .option('-c, --complete', 'Mark as completed')
+    .option('-C, --incomplete', 'Mark as incomplete')
+    .option('-e, --estimate <minutes>', 'Estimated time in minutes', parseInt)
+    .option(
+      '--shift-due <days>',
+      'Shift due dates by N days (use --shift-due=-2 to pull earlier)',
+      parseInt
+    )
+    .option('--shift-defer <days>', 'Shift defer dates by N days', parseInt)
+    .option('--shift-planned <days>', 'Shift planned dates by N days', parseInt)
+    .action(
+      withErrorHandling(async (idOrNames, options) => {
+        rejectConflictingFlags([
+          [options.flag, options.unflag, '--flag', '--unflag'],
+          [options.complete, options.incomplete, '--complete', '--incomplete'],
+        ]);
+        const of = new OmniFocus();
+        const updates: UpdateTasksOptions = {
+          ...(options.name && { name: options.name }),
+          ...(options.note !== undefined && { note: options.note }),
+          ...(options.project && { project: options.project }),
+          ...(options.tag && { tags: options.tag }),
+          ...(options.due !== undefined && {
+            due: options.due ? parseDateTime(options.due) : null,
+          }),
+          ...(options.defer !== undefined && {
+            defer: options.defer ? parseDateTime(options.defer) : null,
+          }),
+          ...(options.planned !== undefined && {
+            planned: options.planned ? parseDateTime(options.planned) : null,
+          }),
+          ...(options.flag && { flagged: true }),
+          ...(options.unflag && { flagged: false }),
+          ...(options.complete && { completed: true }),
+          ...(options.incomplete && { completed: false }),
+          ...(options.estimate !== undefined && { estimatedMinutes: options.estimate }),
+          ...(options.shiftDue !== undefined && { shiftDueDays: options.shiftDue }),
+          ...(options.shiftDefer !== undefined && { shiftDeferDays: options.shiftDefer }),
+          ...(options.shiftPlanned !== undefined && { shiftPlannedDays: options.shiftPlanned }),
+        };
+        const results = await of.updateTasks(idOrNames, updates);
+        outputJson(results);
+      })
+    );
+
+  command
+    .command('promote <idOrName>')
+    .description('Convert a task into a project (child tasks come along)')
+    .option('-f, --folder <name>', 'Destination folder (default: end of library)')
+    .action(
+      withErrorHandling(async (idOrName, options) => {
+        const of = new OmniFocus();
+        const project = await of.convertTaskToProject(idOrName, { folder: options.folder });
+        outputJson(project);
       })
     );
 

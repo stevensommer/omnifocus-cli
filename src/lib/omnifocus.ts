@@ -11,8 +11,12 @@ import type {
   ProjectFilters,
   CreateTaskOptions,
   UpdateTaskOptions,
+  UpdateTasksOptions,
+  BatchUpdateResult,
   CreateProjectOptions,
   UpdateProjectOptions,
+  CompleteProjectOptions,
+  ConvertTaskToProjectOptions,
   Perspective,
   Tag,
   TagListOptions,
@@ -23,6 +27,9 @@ import type {
   UpdateTagOptions,
   Folder,
   FolderFilters,
+  CreateFolderOptions,
+  UpdateFolderOptions,
+  CleanupInboxResult,
 } from '../types.js';
 
 const execFileAsync = promisify(execFile);
@@ -140,6 +147,11 @@ export class OmniFocus {
         taskCount: allTasks.length,
         remainingCount: remainingTasks.length,
         tags: tagNames,
+        reviewInterval: project.reviewInterval
+          ? { steps: project.reviewInterval.steps, unit: project.reviewInterval.unit }
+          : null,
+        lastReviewDate: isoOrNull(project.lastReviewDate),
+        nextReviewDate: isoOrNull(project.nextReviewDate),
         url: objectUrl(project, 'project')
       };
     }
@@ -155,6 +167,12 @@ export class OmniFocus {
       throw new Error("Task not found: " + idOrName);
     }
 
+    // find* helpers are exact-match only (id or exact name): every call site
+    // is a mutating/destructive path (update, delete, move-into, inbox-file),
+    // so a wrong guess is not a wrong read but a wrong write. Fuzzy Quick Open
+    // matching is deliberately NOT offered here — it lives only in the
+    // dedicated search_projects/search_tags/search_folders tools, where a
+    // guess just returns candidates for the caller to look at, not act on.
     function findProject(idOrName) {
       const byId = Project.byIdentifier(idOrName);
       if (byId) return byId;
@@ -164,6 +182,17 @@ export class OmniFocus {
         }
       }
       throw new Error("Project not found: " + idOrName);
+    }
+
+    function findFolder(idOrName) {
+      const byId = Folder.byIdentifier(idOrName);
+      if (byId) return byId;
+      for (const folder of flattenedFolders) {
+        if (folder.name === idOrName) {
+          return folder;
+        }
+      }
+      throw new Error("Folder not found: " + idOrName);
     }
 
     function getTagPath(tag) {
@@ -243,6 +272,11 @@ export class OmniFocus {
     const folderStatusToString = (status) => {
       if (status === Folder.Status.Active) return 'active';
       return 'dropped';
+    };
+    const stringToFolderStatus = (str) => {
+      if (str === 'active') return Folder.Status.Active;
+      if (str === 'dropped') return Folder.Status.Dropped;
+      throw new Error('Unknown folder status: ' + str);
     };
     const stringToProjectStatus = (str) => stringToStatus(str, Project.Status);
     const stringToTagStatus = (str) => stringToStatus(str, Tag.Status);
@@ -382,12 +416,31 @@ export class OmniFocus {
     `.trim();
   }
 
+  // YYYY-MM-DD, optionally with a time component (space or "T" separated,
+  // optional seconds/fraction, optional "Z" or +HH:mm offset) — the two
+  // formats CLAUDE.md documents as accepted input. Deliberately stricter
+  // than "anything new Date() can parse": bare `new Date(...)` also accepts
+  // ambiguous strings like "Jan 5" or "2024" and silently resolves them to
+  // some other date, rather than throwing — confirmed live (via updateTasks
+  // with due: "Jan 5", which set the task's due date to 2000-01-04 with no
+  // error at all). Requiring this shape turns that silent corruption into a
+  // clean 400 instead.
+  private static readonly ISO_DATE_RE =
+    /^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
+
   /**
-   * Validate an ISO 8601 filter value and return it normalised for embedding
-   * in the generated script. Rejecting here gives a clean 400 instead of a
-   * baffling empty result from an Invalid Date comparison inside OmniFocus.
+   * Validate an ISO 8601 date/filter value and return it normalised for
+   * embedding in the generated script. Rejecting here gives a clean 400
+   * instead of a baffling empty result (or, for ambiguous input, a silently
+   * wrong date) from a loose Date parse inside OmniFocus.
    */
   private isoDateArg(value: string, filterName: string): string {
+    if (!OmniFocus.ISO_DATE_RE.test(value)) {
+      throw new OmniFocusCliError(
+        `Invalid ${filterName} date: "${value}" (expected ISO 8601, e.g. "2024-01-15" or "2024-01-15T10:00:00")`,
+        400
+      );
+    }
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) {
       throw new OmniFocusCliError(
@@ -524,27 +577,27 @@ export class OmniFocus {
     if (options.defer !== undefined) {
       updates.push(
         options.defer
-          ? `task.deferDate = new Date(${JSON.stringify(options.defer)});`
+          ? `task.deferDate = new Date(${JSON.stringify(this.isoDateArg(options.defer, 'defer'))});`
           : 'task.deferDate = null;'
       );
     }
     if (options.due !== undefined) {
       updates.push(
         options.due
-          ? `task.dueDate = new Date(${JSON.stringify(options.due)});`
+          ? `task.dueDate = new Date(${JSON.stringify(this.isoDateArg(options.due, 'due'))});`
           : 'task.dueDate = null;'
       );
     }
     if (options.planned !== undefined) {
       updates.push(
         options.planned
-          ? `task.plannedDate = new Date(${JSON.stringify(options.planned)});`
+          ? `task.plannedDate = new Date(${JSON.stringify(this.isoDateArg(options.planned, 'planned'))});`
           : 'task.plannedDate = null;'
       );
     }
     if (options.project !== undefined && options.project) {
       updates.push(`
-        const targetProject = findByName(flattenedProjects, "${this.escapeString(options.project)}", "Project");
+        const targetProject = findProject("${this.escapeString(options.project)}");
         moveTasks([task], targetProject);
       `);
     }
@@ -562,7 +615,7 @@ export class OmniFocus {
       updates.push(`tag.name = "${this.escapeString(options.name)}";`);
     }
     if (options.status !== undefined) {
-      updates.push(`tag.status = stringToTagStatus("${options.status}");`);
+      updates.push(`tag.status = stringToTagStatus("${this.escapeString(options.status)}");`);
     }
 
     return updates.join('\n    ');
@@ -581,19 +634,70 @@ export class OmniFocus {
       updates.push(`project.sequential = ${options.sequential};`);
     }
     if (options.status !== undefined) {
-      updates.push(`project.status = stringToProjectStatus("${options.status}");`);
+      updates.push(
+        `project.status = stringToProjectStatus("${this.escapeString(options.status)}");`
+      );
     }
     if (options.folder !== undefined && options.folder) {
       updates.push(`
-        const targetFolder = findByName(flattenedFolders, "${this.escapeString(options.folder)}", "Folder");
+        const targetFolder = findFolder("${this.escapeString(options.folder)}");
         moveSections([project], targetFolder);
       `);
     }
     if (options.tags !== undefined) {
       updates.push(`replaceTagsOn(project, ${JSON.stringify(options.tags)});`);
     }
+    if (options.reviewInterval !== undefined) {
+      updates.push(this.reviewIntervalCode(options.reviewInterval));
+    }
 
     return updates.join('\n    ');
+  }
+
+  /**
+   * Parse a human review interval like "1 week" or "2 months" into the
+   * {steps, unit} shape Project.ReviewInterval expects.
+   */
+  private parseReviewInterval(value: string): { steps: number; unit: string } {
+    const match = value.trim().match(/^(\d+)\s*(day|week|month|year)s?$/i);
+    if (!match) {
+      throw new OmniFocusCliError(
+        `Invalid review interval: "${value}" (expected e.g. "1 week", "2 months")`,
+        400
+      );
+    }
+    return { steps: Number.parseInt(match[1], 10), unit: `${match[2].toLowerCase()}s` };
+  }
+
+  /**
+   * Project.ReviewInterval is a value object, not a proxy: mutate a copy and
+   * assign it back (per the Omni Automation docs) — property writes on the
+   * live value would silently do nothing.
+   *
+   * project.reviewInterval is documented as "Project.ReviewInterval or null"
+   * (a project with no review schedule configured), and there is no public
+   * constructor for the value object — `new Project.ReviewInterval()` throws
+   * "CallbackObject is not a constructor", and assigning a plain {steps,
+   * unit} literal is rejected with a type error, both confirmed live against
+   * OmniFocus 4.8.12. So when reviewInterval is null there is no way to
+   * build one from scratch; guard and fail with a clear, actionable message
+   * instead of letting `ri.steps = …` throw a bare "null is not an object"
+   * from deep inside the generated script.
+   */
+  private reviewIntervalCode(value: string): string {
+    const { steps, unit } = this.parseReviewInterval(value);
+    return `
+        const ri = project.reviewInterval;
+        if (!ri) {
+          throw new Error(
+            "Project has no review interval configured; set one from the OmniFocus UI " +
+            "(Project Inspector > Review) before updating it via the CLI."
+          );
+        }
+        ri.steps = ${steps};
+        ri.unit = "${unit}";
+        project.reviewInterval = ri;
+      `;
   }
 
   async listTasks(filters: TaskFilters = {}): Promise<Task[]> {
@@ -619,7 +723,7 @@ export class OmniFocus {
       (() => {
         ${
           options.project
-            ? `const targetProject = findByName(flattenedProjects, "${this.escapeString(options.project)}", "Project");
+            ? `const targetProject = findProject("${this.escapeString(options.project)}");
              const task = new Task("${this.escapeString(options.name)}", targetProject);`
             : `const task = new Task("${this.escapeString(options.name)}");`
         }
@@ -707,15 +811,16 @@ export class OmniFocus {
       (() => {
         ${
           options.folder
-            ? `const targetFolder = findByName(flattenedFolders, "${this.escapeString(options.folder)}", "Folder");
+            ? `const targetFolder = findFolder("${this.escapeString(options.folder)}");
              const project = new Project("${this.escapeString(options.name)}", targetFolder);`
             : `const project = new Project("${this.escapeString(options.name)}");`
         }
 
         ${options.note ? `project.note = "${this.escapeString(options.note)}";` : ''}
         ${options.sequential !== undefined ? `project.sequential = ${options.sequential};` : ''}
-        ${options.status ? `project.status = stringToProjectStatus("${options.status}");` : ''}
+        ${options.status ? `project.status = stringToProjectStatus("${this.escapeString(options.status)}");` : ''}
         ${options.tags && options.tags.length > 0 ? `assignTags(project, ${JSON.stringify(options.tags)});` : ''}
+        ${options.reviewInterval !== undefined ? this.reviewIntervalCode(options.reviewInterval) : ''}
 
         return JSON.stringify(serializeProject(project));
       })();
@@ -1044,7 +1149,7 @@ export class OmniFocus {
             : `const tag = new Tag("${this.escapeString(options.name)}", tags.beginning);`
         }
 
-        ${options.status ? `tag.status = stringToTagStatus("${options.status}");` : ''}
+        ${options.status ? `tag.status = stringToTagStatus("${this.escapeString(options.status)}");` : ''}
 
         return JSON.stringify(serializeTag(tag));
       })();
@@ -1255,18 +1360,344 @@ export class OmniFocus {
       ${this.OMNI_HELPERS}
       (() => {
         const includeDropped = ${includeDropped};
-
-        function findFolder(idOrName) {
-          for (const folder of flattenedFolders) {
-            if (folder.id.primaryKey === idOrName || folder.name === idOrName) {
-              return folder;
-            }
-          }
-          throw new Error("Folder not found: " + idOrName);
-        }
-
         const folder = findFolder("${this.escapeString(idOrName)}");
         return JSON.stringify(serializeFolder(folder, includeDropped));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Complete (or un-complete) a project via markComplete/markIncomplete
+   * rather than raw status assignment — markComplete correctly handles
+   * repeating projects by cloning and completing the clone.
+   */
+  async completeProject(idOrName: string, options: CompleteProjectOptions = {}): Promise<Project> {
+    const action = options.incomplete
+      ? 'project.markIncomplete();'
+      : options.date
+        ? `project.markComplete(new Date(${JSON.stringify(this.isoDateArg(options.date, 'completion'))}));`
+        : 'project.markComplete();';
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const project = findProject("${this.escapeString(idOrName)}");
+        ${action}
+        return JSON.stringify(serializeProject(project));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Projects whose next review is due (nextReviewDate <= now). Headless: the
+   * Review perspective is never touched — this queries flattenedProjects.
+   * Dropped and completed projects are excluded; they aren't reviewed.
+   */
+  async listProjectsDueForReview(): Promise<Project[]> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const now = new Date();
+        const results = [];
+        for (const project of flattenedProjects) {
+          if (project.status === Project.Status.Dropped || project.status === Project.Status.Done) continue;
+          if (project.parentFolder && !project.parentFolder.effectiveActive) continue;
+          const next = project.nextReviewDate;
+          if (!next || next > now) continue;
+          results.push(serializeProject(project));
+        }
+        return JSON.stringify(results);
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Mark a project reviewed now: sets lastReviewDate, from which OmniFocus
+   * recomputes nextReviewDate using the project's review interval.
+   */
+  async markProjectReviewed(idOrName: string): Promise<Project> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const project = findProject("${this.escapeString(idOrName)}");
+        project.lastReviewDate = new Date();
+        return JSON.stringify(serializeProject(project));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Emit the date-shift statements for a batch update. Each shift reads the
+   * task's current date, adds N days (negative pulls earlier), and writes it
+   * back; tasks lacking that date are skipped rather than failed.
+   */
+  private buildDateShifts(options: UpdateTasksOptions): string {
+    const shifts: Array<[number | undefined, string, string]> = [
+      [options.shiftDueDays, 'shiftDueDays', 'dueDate'],
+      [options.shiftDeferDays, 'shiftDeferDays', 'deferDate'],
+      [options.shiftPlannedDays, 'shiftPlannedDays', 'plannedDate'],
+    ];
+    const code: string[] = [];
+    for (const [days, optionName, property] of shifts) {
+      if (days === undefined) continue;
+      if (!Number.isInteger(days)) {
+        throw new OmniFocusCliError(`Invalid ${optionName}: ${days} (expected an integer)`, 400);
+      }
+      code.push(
+        `{ const d = task.${property}; if (d) { d.setDate(d.getDate() + ${days}); task.${property} = d; } }`
+      );
+    }
+    return code.join('\n          ');
+  }
+
+  /**
+   * Apply the same updates to many tasks in a single osascript round trip.
+   * Returns a per-id result array; an unresolved id records an error entry
+   * instead of aborting the whole batch.
+   */
+  async updateTasks(ids: string[], options: UpdateTasksOptions = {}): Promise<BatchUpdateResult[]> {
+    if (ids.length === 0) {
+      throw new OmniFocusCliError('No task ids given', 400);
+    }
+    const { shiftDueDays, shiftDeferDays, shiftPlannedDays, ...updates } = options;
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const ids = ${JSON.stringify(ids)};
+        const results = [];
+        for (const id of ids) {
+          try {
+            const task = findTask(id);
+            ${this.buildTaskUpdates(updates)}
+            ${this.buildDateShifts({ shiftDueDays, shiftDeferDays, shiftPlannedDays })}
+            results.push({ id: id, ok: true, task: serializeTask(task) });
+          } catch (e) {
+            results.push({ id: id, ok: false, error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+        return JSON.stringify(results);
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /** Fuzzy project search with Quick Open semantics (projectsMatching). */
+  async searchProjects(query: string): Promise<Project[]> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const matches = projectsMatching("${this.escapeString(query)}");
+        return JSON.stringify(matches.map(p => serializeProject(p)));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /** Fuzzy tag search with Quick Open semantics (tagsMatching). */
+  async searchTags(query: string): Promise<Tag[]> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const matches = tagsMatching("${this.escapeString(query)}");
+        return JSON.stringify(matches.map(t => serializeTag(t)));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /** Fuzzy folder search with Quick Open semantics (foldersMatching). */
+  async searchFolders(query: string): Promise<Folder[]> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const matches = foldersMatching("${this.escapeString(query)}");
+        return JSON.stringify(matches.map(f => serializeFolder(f)));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Process the inbox: optionally give unassigned inbox tasks a tentative
+   * container (assignedContainer), then run Database.cleanUp() so OmniFocus
+   * files them. Without a container this just runs cleanUp(), which also
+   * refreshes stale tag/task membership.
+   */
+  async cleanupInbox(options: { container?: string } = {}): Promise<CleanupInboxResult> {
+    const assignCode = options.container
+      ? `
+        const target = findProject("${this.escapeString(options.container)}");
+        for (const task of inbox) {
+          if (task.assignedContainer === null) {
+            task.assignedContainer = target;
+            assigned += 1;
+          }
+        }`
+      : '';
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const before = inbox.length;
+        let assigned = 0;
+        ${assignCode}
+        cleanUp();
+        return JSON.stringify({ inboxBefore: before, assigned: assigned, inboxAfter: inbox.length });
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Undo the last change in OmniFocus. Undo granularity is OmniFocus's own
+   * action grouping: one evaluateJavascript script is typically one undo
+   * group, so this is a clean escape hatch after a batch operation.
+   */
+  async undo(): Promise<{ undone: boolean }> {
+    const omniScript = `
+      (() => {
+        if (!canUndo) {
+          throw new Error("Nothing to undo");
+        }
+        undo();
+        return JSON.stringify({ undone: true });
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  async redo(): Promise<{ redone: boolean }> {
+    const omniScript = `
+      (() => {
+        if (!canRedo) {
+          throw new Error("Nothing to redo");
+        }
+        redo();
+        return JSON.stringify({ redone: true });
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /** Save the database; when sync is enabled this also triggers a sync. */
+  async syncNow(): Promise<{ saved: boolean }> {
+    const omniScript = `
+      (() => {
+        save();
+        return JSON.stringify({ saved: true });
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  async createFolder(options: CreateFolderOptions): Promise<Folder> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        ${
+          options.parent
+            ? `const parentFolder = findFolder("${this.escapeString(options.parent)}");
+             const folder = new Folder("${this.escapeString(options.name)}", parentFolder);`
+            : `const folder = new Folder("${this.escapeString(options.name)}");`
+        }
+        return JSON.stringify(serializeFolder(folder));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  private buildFolderUpdates(options: UpdateFolderOptions): string {
+    const updates: string[] = [];
+
+    if (options.name !== undefined) {
+      updates.push(`folder.name = "${this.escapeString(options.name)}";`);
+    }
+    if (options.status !== undefined) {
+      updates.push(`folder.status = stringToFolderStatus("${this.escapeString(options.status)}");`);
+    }
+    if (options.parent !== undefined && options.parent) {
+      updates.push(`
+        const destFolder = findFolder("${this.escapeString(options.parent)}");
+        moveSections([folder], destFolder);
+      `);
+    }
+
+    return updates.join('\n    ');
+  }
+
+  async updateFolder(idOrName: string, options: UpdateFolderOptions): Promise<Folder> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const folder = findFolder("${this.escapeString(idOrName)}");
+        ${this.buildFolderUpdates(options)}
+        return JSON.stringify(serializeFolder(folder));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  async deleteFolder(idOrName: string): Promise<void> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        deleteObject(findFolder("${this.escapeString(idOrName)}"));
+      })();
+    `;
+
+    await this.executeJXA(this.wrapOmniScript(omniScript));
+  }
+
+  /**
+   * Promote a task to a project (Database.convertTasksToProjects). Child
+   * tasks come along; the new project lands in the given folder or at the
+   * end of the library.
+   */
+  async convertTaskToProject(
+    idOrName: string,
+    options: ConvertTaskToProjectOptions = {}
+  ): Promise<Project> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const task = findTask("${this.escapeString(idOrName)}");
+        ${
+          options.folder
+            ? `const destination = findFolder("${this.escapeString(options.folder)}");`
+            : 'const destination = library.ending;'
+        }
+        const newProjects = convertTasksToProjects([task], destination);
+        return JSON.stringify(serializeProject(newProjects[0]));
       })();
     `;
 

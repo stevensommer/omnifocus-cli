@@ -39,6 +39,15 @@ export interface Task {
   url: string;
 }
 
+/**
+ * A project's review repetition, mirroring Omni Automation's
+ * Project.ReviewInterval value object.
+ */
+export interface ReviewInterval {
+  steps: number;
+  unit: 'days' | 'weeks' | 'months' | 'years';
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -58,6 +67,9 @@ export interface Project {
   taskCount: number;
   remainingCount: number;
   tags: string[];
+  reviewInterval: ReviewInterval | null;
+  lastReviewDate: string | null;
+  nextReviewDate: string | null;
   url: string;
 }
 
@@ -123,6 +135,8 @@ export interface CreateProjectOptions {
   sequential?: boolean;
   tags?: string[];
   status?: 'active' | 'on hold' | 'dropped';
+  /** Review interval as a human string, e.g. "1 week" or "2 months". */
+  reviewInterval?: string;
 }
 
 export interface UpdateProjectOptions {
@@ -132,6 +146,56 @@ export interface UpdateProjectOptions {
   sequential?: boolean;
   tags?: string[];
   status?: 'active' | 'on hold' | 'dropped';
+  /** Review interval as a human string, e.g. "1 week" or "2 months". */
+  reviewInterval?: string;
+}
+
+/**
+ * Batch update options: the shared UpdateTaskOptions fields apply to every
+ * task; the shift* fields add N days (negative to pull earlier) to each
+ * task's existing date, skipping tasks that lack that date.
+ */
+export interface UpdateTasksOptions extends UpdateTaskOptions {
+  shiftDueDays?: number;
+  shiftDeferDays?: number;
+  shiftPlannedDays?: number;
+}
+
+/** Per-task outcome of a batch update; a missing task doesn't fail the batch. */
+export interface BatchUpdateResult {
+  id: string;
+  ok: boolean;
+  task?: Task;
+  error?: string;
+}
+
+export interface CleanupInboxResult {
+  inboxBefore: number;
+  assigned: number;
+  inboxAfter: number;
+}
+
+export interface CompleteProjectOptions {
+  /** Mark the project incomplete instead of complete. */
+  incomplete?: boolean;
+  /** Completion date (ISO 8601); defaults to now. Ignored with incomplete. */
+  date?: string;
+}
+
+export interface ConvertTaskToProjectOptions {
+  /** Destination folder ID or name; defaults to the end of the library. */
+  folder?: string;
+}
+
+export interface CreateFolderOptions {
+  name: string;
+  parent?: string;
+}
+
+export interface UpdateFolderOptions {
+  name?: string;
+  status?: 'active' | 'dropped';
+  parent?: string;
 }
 
 export interface Perspective {

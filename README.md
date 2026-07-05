@@ -170,12 +170,13 @@ The first connection triggers the same macOS Automation permission prompt as the
 
 | Domain | Tools |
 | --- | --- |
-| Tasks | `list_tasks`, `get_task`, `create_task`, `update_task`, `delete_task`, `search_tasks`, `get_task_stats` |
-| Inbox | `list_inbox`, `get_inbox_count` |
-| Projects | `list_projects`, `get_project`, `create_project`, `update_project`, `delete_project`, `get_project_stats` |
-| Tags | `list_tags`, `get_tag`, `create_tag`, `update_tag`, `delete_tag`, `get_tag_stats` |
-| Folders | `list_folders`, `get_folder` |
+| Tasks | `list_tasks`, `get_task`, `create_task`, `update_task`, `update_tasks`, `drop_task`, `delete_task`, `search_tasks`, `convert_task_to_project`, `get_task_stats` |
+| Inbox | `list_inbox`, `get_inbox_count`, `cleanup_inbox` |
+| Projects | `list_projects`, `get_project`, `create_project`, `update_project`, `complete_project`, `delete_project`, `search_projects`, `list_projects_due_for_review`, `mark_project_reviewed`, `get_project_stats` |
+| Tags | `list_tags`, `get_tag`, `create_tag`, `update_tag`, `delete_tag`, `search_tags`, `get_tag_stats` |
+| Folders | `list_folders`, `get_folder`, `create_folder`, `update_folder`, `delete_folder`, `search_folders` |
 | Perspectives | `list_perspectives`, `get_perspective_tasks` |
+| Database | `undo`, `redo`, `sync_now` |
 | Discovery | `search_tools` |
 
 Every tool returns the same JSON shape as its CLI counterpart. `search_tools` takes a case-insensitive regex and returns matching tool names/descriptions — useful for agents that want to discover capabilities without loading every schema up front.

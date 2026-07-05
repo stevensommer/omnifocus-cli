@@ -1,8 +1,10 @@
 import { Command } from 'commander';
 import { outputJson } from '../lib/output.js';
-import { withErrorHandling } from '../lib/command-utils.js';
+import { validateStatus, withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import type { UpdateTagOptions } from '../types.js';
+
+const TAG_STATUSES = ['active', 'on hold', 'dropped'] as const;
 
 export function createTagCommand(): Command {
   const command = new Command('tag');
@@ -38,9 +40,20 @@ export function createTagCommand(): Command {
         const tag = await of.createTag({
           name,
           parent: options.parent,
-          status: options.status,
+          status: validateStatus(options.status, TAG_STATUSES),
         });
         outputJson(tag);
+      })
+    );
+
+  command
+    .command('search <query>')
+    .description('Fuzzy-search tags (Quick Open matching)')
+    .action(
+      withErrorHandling(async (query) => {
+        const of = new OmniFocus();
+        const tags = await of.searchTags(query);
+        outputJson(tags);
       })
     );
 
@@ -65,7 +78,7 @@ export function createTagCommand(): Command {
         const of = new OmniFocus();
         const updates: UpdateTagOptions = {
           ...(options.name && { name: options.name }),
-          ...(options.status && { status: options.status }),
+          ...(options.status && { status: validateStatus(options.status, TAG_STATUSES) }),
         };
         const tag = await of.updateTag(idOrName, updates);
         outputJson(tag);

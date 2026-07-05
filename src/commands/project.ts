@@ -1,8 +1,11 @@
 import { Command } from 'commander';
 import { outputJson } from '../lib/output.js';
-import { withErrorHandling } from '../lib/command-utils.js';
+import { validateStatus, withErrorHandling } from '../lib/command-utils.js';
 import { OmniFocus } from '../lib/omnifocus.js';
+import { parseDateTime } from '../lib/dates.js';
 import type { ProjectFilters, UpdateProjectOptions } from '../types.js';
+
+const PROJECT_STATUSES = ['active', 'on hold', 'dropped'] as const;
 
 export function createProjectCommand(): Command {
   const command = new Command('project');
@@ -36,6 +39,7 @@ export function createProjectCommand(): Command {
     .option('-t, --tag <tags...>', 'Add tags')
     .option('-s, --sequential', 'Make it a sequential project')
     .option('--status <status>', 'Set status (active, on hold, dropped)')
+    .option('--review-interval <interval>', 'Review interval, e.g. "1 week" or "2 months"')
     .action(
       withErrorHandling(async (name, options) => {
         const of = new OmniFocus();
@@ -45,7 +49,8 @@ export function createProjectCommand(): Command {
           folder: options.folder,
           tags: options.tag,
           sequential: options.sequential,
-          status: options.status,
+          status: validateStatus(options.status, PROJECT_STATUSES),
+          reviewInterval: options.reviewInterval,
         });
         outputJson(project);
       })
@@ -61,6 +66,7 @@ export function createProjectCommand(): Command {
     .option('-s, --sequential', 'Make it sequential')
     .option('-p, --parallel', 'Make it parallel')
     .option('--status <status>', 'Set status (active, on hold, dropped)')
+    .option('--review-interval <interval>', 'Review interval, e.g. "1 week" or "2 months"')
     .action(
       withErrorHandling(async (idOrName, options) => {
         const of = new OmniFocus();
@@ -71,10 +77,60 @@ export function createProjectCommand(): Command {
           ...(options.tag && { tags: options.tag }),
           ...(options.sequential && { sequential: true }),
           ...(options.parallel && { sequential: false }),
-          ...(options.status && { status: options.status }),
+          ...(options.status && { status: validateStatus(options.status, PROJECT_STATUSES) }),
+          ...(options.reviewInterval && { reviewInterval: options.reviewInterval }),
         };
         const project = await of.updateProject(idOrName, updates);
         outputJson(project);
+      })
+    );
+
+  command
+    .command('complete <idOrName>')
+    .description('Mark a project complete (markComplete handles repeating projects)')
+    .option('--date <date>', 'Completion date (defaults to now)')
+    .option('--incomplete', 'Mark the project incomplete instead')
+    .action(
+      withErrorHandling(async (idOrName, options) => {
+        const of = new OmniFocus();
+        const project = await of.completeProject(idOrName, {
+          incomplete: options.incomplete,
+          date: options.date ? parseDateTime(options.date) : undefined,
+        });
+        outputJson(project);
+      })
+    );
+
+  command
+    .command('review-list')
+    .description('List projects due for review (next review date has passed)')
+    .action(
+      withErrorHandling(async () => {
+        const of = new OmniFocus();
+        const projects = await of.listProjectsDueForReview();
+        outputJson(projects);
+      })
+    );
+
+  command
+    .command('mark-reviewed <idOrName>')
+    .description('Mark a project reviewed now (reschedules its next review)')
+    .action(
+      withErrorHandling(async (idOrName) => {
+        const of = new OmniFocus();
+        const project = await of.markProjectReviewed(idOrName);
+        outputJson(project);
+      })
+    );
+
+  command
+    .command('search <query>')
+    .description('Fuzzy-search projects (Quick Open matching)')
+    .action(
+      withErrorHandling(async (query) => {
+        const of = new OmniFocus();
+        const projects = await of.searchProjects(query);
+        outputJson(projects);
       })
     );
 
