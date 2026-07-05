@@ -31,6 +31,10 @@ const OF_METHODS = [
   'deleteTask',
   'searchTasks',
   'convertTaskToProject',
+  'setTaskRepeat',
+  'moveTask',
+  'duplicateTask',
+  'parseTasks',
   'getTaskStats',
   'listInboxTasks',
   'getInboxCount',
@@ -111,6 +115,10 @@ const EXPECTED_TOOL_NAMES = [
   'delete_task',
   'search_tasks',
   'convert_task_to_project',
+  'set_task_repeat',
+  'move_task',
+  'duplicate_task',
+  'parse_tasks',
   'get_task_stats',
   'list_inbox',
   'get_inbox_count',
@@ -180,10 +188,12 @@ describe('buildTools catalogue', () => {
   });
 
   it('annotates tools consistently with their naming convention', () => {
-    // Verbs that mutate existing items (or rewind history) are destructive;
-    // undo/redo/convert_task_to_project are matched exactly rather than by
-    // prefix so a future undo_*/convert_*/other read-ish-sounding tool would
-    // fail this guard and force a deliberate decision here.
+    // Verbs that mutate existing items (or rewind history) are destructive.
+    // move_/set_ change existing items in place, while duplicate_/parse_
+    // only create new ones. undo/redo/convert_task_to_project are matched
+    // exactly rather than by prefix so a future undo_*/convert_*/other
+    // read-ish-sounding tool would fail this guard and force a deliberate
+    // decision here.
     //
     // convert_task_to_project doesn't match any destructive prefix (it reads
     // as a "create" verb) but it destroys the original task in the process —
@@ -192,7 +202,7 @@ describe('buildTools catalogue', () => {
     // semantics all change; the id survives only because it becomes the
     // project's root task id). It must be exact-matched here rather than
     // left to default to non-destructive.
-    const destructivePattern = /^(update_|delete_|drop_|complete_|mark_|cleanup_)/;
+    const destructivePattern = /^(update_|delete_|drop_|complete_|mark_|cleanup_|move_|set_)/;
     const destructiveExact = new Set(['undo', 'redo', 'convert_task_to_project']);
     for (const t of buildTools(makeMockOf().of)) {
       const readOnly = /^(list_|get_|search_)/.test(t.name);
@@ -314,6 +324,122 @@ describe('tool handlers map arguments to OmniFocus calls', () => {
     const result = await callTool(tools, 'drop_task', { idOrName: 't1', allOccurrences: true });
     expect(result).toEqual({ id: 't1', dropped: true });
     expect(calls).toContainEqual({ method: 'dropTask', args: ['t1', { allOccurrences: true }] });
+  });
+
+  it('update_task forwards hierarchy options (parent, sequential, completedByChildren)', async () => {
+    const { of, calls } = makeMockOf({ updateTask: { id: 't1' } });
+    const tools = buildTools(of);
+    await callTool(tools, 'update_task', {
+      idOrName: 't1',
+      parent: 'Group',
+      sequential: true,
+      completedByChildren: false,
+    });
+    expect(calls).toContainEqual({
+      method: 'updateTask',
+      args: ['t1', { parent: 'Group', sequential: true, completedByChildren: false }],
+    });
+  });
+
+  it('create_task forwards the parent option', async () => {
+    const { of, calls } = makeMockOf({ createTask: { id: 'c1' } });
+    const tools = buildTools(of);
+    await callTool(tools, 'create_task', { name: 'Child', parent: 'Group' });
+    expect(calls).toContainEqual({
+      method: 'createTask',
+      args: [{ name: 'Child', parent: 'Group' }],
+    });
+  });
+
+  it('get_task forwards includeChildren as options', async () => {
+    const { of, calls } = makeMockOf({ getTask: { id: 't1', children: [] } });
+    const tools = buildTools(of);
+    await callTool(tools, 'get_task', { idOrName: 't1', includeChildren: true });
+    expect(calls).toContainEqual({
+      method: 'getTask',
+      args: ['t1', { includeChildren: true }],
+    });
+  });
+
+  it('set_task_repeat splits idOrName from the repeat options', async () => {
+    const { of, calls } = makeMockOf({ setTaskRepeat: { id: 't1' } });
+    const tools = buildTools(of);
+    await callTool(tools, 'set_task_repeat', {
+      idOrName: 't1',
+      rule: 'FREQ=WEEKLY;BYDAY=MO',
+      schedule: 'fromCompletion',
+      anchor: 'deferDate',
+      catchUp: true,
+    });
+    expect(calls).toContainEqual({
+      method: 'setTaskRepeat',
+      args: [
+        't1',
+        {
+          rule: 'FREQ=WEEKLY;BYDAY=MO',
+          schedule: 'fromCompletion',
+          anchor: 'deferDate',
+          catchUp: true,
+        },
+      ],
+    });
+  });
+
+  it('set_task_repeat forwards clear', async () => {
+    const { of, calls } = makeMockOf({ setTaskRepeat: { id: 't1', repetition: null } });
+    const tools = buildTools(of);
+    await callTool(tools, 'set_task_repeat', { idOrName: 't1', clear: true });
+    expect(calls).toContainEqual({ method: 'setTaskRepeat', args: ['t1', { clear: true }] });
+  });
+
+  it('move_task flattens "to" and forwards the position', async () => {
+    const { of, calls } = makeMockOf({ moveTask: { id: 't1' } });
+    const tools = buildTools(of);
+    await callTool(tools, 'move_task', {
+      idOrName: 't1',
+      to: { project: 'House' },
+      position: 'beginning',
+    });
+    await callTool(tools, 'move_task', { idOrName: 't1', position: { before: 'Sibling' } });
+    await callTool(tools, 'move_task', { idOrName: 't1', to: { inbox: true } });
+    expect(calls).toContainEqual({
+      method: 'moveTask',
+      args: ['t1', { project: 'House', position: 'beginning' }],
+    });
+    expect(calls).toContainEqual({
+      method: 'moveTask',
+      args: ['t1', { position: { before: 'Sibling' } }],
+    });
+    expect(calls).toContainEqual({ method: 'moveTask', args: ['t1', { inbox: true }] });
+  });
+
+  it('duplicate_task forwards the same destination shape', async () => {
+    const { of, calls } = makeMockOf({ duplicateTask: { id: 't2' } });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'duplicate_task', {
+      idOrName: 't1',
+      to: { parentTask: 'Group' },
+      position: 'end',
+    });
+    expect(result).toEqual({ id: 't2' });
+    expect(calls).toContainEqual({
+      method: 'duplicateTask',
+      args: ['t1', { parentTask: 'Group', position: 'end' }],
+    });
+  });
+
+  it('parse_tasks forwards text and the project option, returning created tasks', async () => {
+    const { of, calls } = makeMockOf({ parseTasks: [{ id: 'n1', name: 'Fix gutters' }] });
+    const tools = buildTools(of);
+    const result = await callTool(tools, 'parse_tasks', {
+      text: 'Fix gutters! @errands',
+      project: 'House',
+    });
+    expect(result).toEqual([{ id: 'n1', name: 'Fix gutters' }]);
+    expect(calls).toContainEqual({
+      method: 'parseTasks',
+      args: ['Fix gutters! @errands', { project: 'House' }],
+    });
   });
 
   it('get_inbox_count wraps the count in an object', async () => {

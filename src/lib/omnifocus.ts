@@ -12,6 +12,10 @@ import type {
   CreateTaskOptions,
   UpdateTaskOptions,
   UpdateTasksOptions,
+  GetTaskOptions,
+  SetTaskRepeatOptions,
+  MoveTaskOptions,
+  ParseTasksOptions,
   BatchUpdateResult,
   CreateProjectOptions,
   UpdateProjectOptions,
@@ -89,6 +93,41 @@ export class OmniFocus {
              status === Task.Status.DueSoon || status === Task.Status.Overdue;
     }
 
+    function serializeRepetition(rule) {
+      if (!rule) return null;
+      // Task.RepetitionScheduleType / Task.AnchorDateKey only exist on
+      // OmniFocus 4.7+. On older builds the namespaces are undefined, so
+      // guard every enum dereference — serializeTask calls this for every
+      // repeating task, and an unguarded access would throw a TypeError that
+      // breaks list/get/search entirely on those versions.
+      const schedNS = Task.RepetitionScheduleType;
+      const anchorNS = Task.AnchorDateKey;
+      let scheduleType = 'regularly';
+      if (schedNS && rule.scheduleType === schedNS.FromCompletion) scheduleType = 'fromCompletion';
+      if (schedNS && rule.scheduleType === schedNS.None) scheduleType = 'none';
+      let anchorDateKey = 'dueDate';
+      if (anchorNS && rule.anchorDateKey === anchorNS.DeferDate) anchorDateKey = 'deferDate';
+      if (anchorNS && rule.anchorDateKey === anchorNS.PlannedDate) anchorDateKey = 'plannedDate';
+      return {
+        ruleString: rule.ruleString,
+        scheduleType: scheduleType,
+        anchorDateKey: anchorDateKey,
+        catchUpAutomatically: rule.catchUpAutomatically
+      };
+    }
+
+    // Parent *task* id. A task sitting directly in a project has the
+    // project's invisible root task as its .parent (Project.task is that
+    // root task), which callers should see as "no parent task" — so it is
+    // reported as null, as is an inbox-root task's null parent.
+    function taskParentId(task) {
+      const parent = task.parent;
+      if (!parent) return null;
+      const project = task.containingProject;
+      if (project && parent.id.primaryKey === project.task.id.primaryKey) return null;
+      return parent.id.primaryKey;
+    }
+
     function serializeTask(task) {
       const containingProject = task.containingProject;
       const tagNames = task.tags.map(t => t.name);
@@ -106,6 +145,12 @@ export class OmniFocus {
         effectiveFlagged: task.effectiveFlagged,
         taskStatus: taskStatusToString(task.taskStatus),
         project: containingProject ? containingProject.name : null,
+        parentId: taskParentId(task),
+        hasChildren: task.hasChildren,
+        childIds: task.children.map(c => c.id.primaryKey),
+        sequential: task.sequential,
+        inInbox: task.inInbox,
+        repetition: serializeRepetition(task.repetitionRule),
         tags: tagNames,
         defer: isoOrNull(task.deferDate),
         due: isoOrNull(task.dueDate),
@@ -152,6 +197,7 @@ export class OmniFocus {
           : null,
         lastReviewDate: isoOrNull(project.lastReviewDate),
         nextReviewDate: isoOrNull(project.nextReviewDate),
+        repetition: serializeRepetition(project.repetitionRule),
         url: objectUrl(project, 'project')
       };
     }
@@ -557,6 +603,12 @@ export class OmniFocus {
   }
 
   private buildTaskUpdates(options: UpdateTaskOptions): string {
+    if (options.project !== undefined && options.parent !== undefined) {
+      throw new OmniFocusCliError(
+        'Cannot set both project and parent: they are competing move destinations',
+        400
+      );
+    }
     const updates: string[] = [];
 
     if (options.name !== undefined) {
@@ -595,10 +647,23 @@ export class OmniFocus {
           : 'task.plannedDate = null;'
       );
     }
+    if (options.sequential !== undefined) {
+      updates.push(`task.sequential = ${options.sequential};`);
+    }
+    if (options.completedByChildren !== undefined) {
+      updates.push(`task.completedByChildren = ${options.completedByChildren};`);
+    }
     if (options.project !== undefined && options.project) {
       updates.push(`
         const targetProject = findProject("${this.escapeString(options.project)}");
         moveTasks([task], targetProject);
+      `);
+    }
+    if (options.parent !== undefined && options.parent) {
+      // Reparent: moving a task onto another task makes it a child of it.
+      updates.push(`
+        const newParent = findTask("${this.escapeString(options.parent)}");
+        moveTasks([task], newParent);
       `);
     }
     if (options.tags !== undefined) {
@@ -718,15 +783,24 @@ export class OmniFocus {
   }
 
   async createTask(options: CreateTaskOptions): Promise<Task> {
+    if (options.project && options.parent) {
+      throw new OmniFocusCliError(
+        'Cannot set both project and parent: a child task inherits its project from the parent task',
+        400
+      );
+    }
+    // Passing a Task as the position parents the new task under it (action group).
+    const construction = options.parent
+      ? `const parentTask = findTask("${this.escapeString(options.parent)}");
+             const task = new Task("${this.escapeString(options.name)}", parentTask);`
+      : options.project
+        ? `const targetProject = findProject("${this.escapeString(options.project)}");
+             const task = new Task("${this.escapeString(options.name)}", targetProject);`
+        : `const task = new Task("${this.escapeString(options.name)}");`;
     const omniScript = `
       ${this.OMNI_HELPERS}
       (() => {
-        ${
-          options.project
-            ? `const targetProject = findProject("${this.escapeString(options.project)}");
-             const task = new Task("${this.escapeString(options.name)}", targetProject);`
-            : `const task = new Task("${this.escapeString(options.name)}");`
-        }
+        ${construction}
 
         ${options.note ? `task.note = "${this.escapeString(options.note)}";` : ''}
         ${options.flagged ? 'task.flagged = true;' : ''}
@@ -928,12 +1002,14 @@ export class OmniFocus {
     return JSON.parse(output);
   }
 
-  async getTask(idOrName: string): Promise<Task> {
+  async getTask(idOrName: string, options: GetTaskOptions = {}): Promise<Task> {
     const omniScript = `
       ${this.OMNI_HELPERS}
       (() => {
         const task = findTask("${this.escapeString(idOrName)}");
-        return JSON.stringify(serializeTask(task));
+        const result = serializeTask(task);
+        ${options.includeChildren ? 'result.children = task.children.map(c => serializeTask(c));' : ''}
+        return JSON.stringify(result);
       })();
     `;
 
@@ -1698,6 +1774,174 @@ export class OmniFocus {
         }
         const newProjects = convertTasksToProjects([task], destination);
         return JSON.stringify(serializeProject(newProjects[0]));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Set (or clear) a task's repeat pattern using the OmniFocus 4.7+ five-arg
+   * RepetitionRule constructor. An invalid ICS rule string throws inside
+   * OmniFocus and surfaces as a clean error.
+   */
+  async setTaskRepeat(idOrName: string, options: SetTaskRepeatOptions): Promise<Task> {
+    let action: string;
+    if (options.clear) {
+      if (options.rule !== undefined) {
+        throw new OmniFocusCliError('Cannot combine clear with a rule', 400);
+      }
+      action = 'task.repetitionRule = null;';
+    } else {
+      if (!options.rule) {
+        throw new OmniFocusCliError(
+          'A rule is required unless clearing (e.g. "FREQ=WEEKLY;BYDAY=MO")',
+          400
+        );
+      }
+      const scheduleEnum = { regularly: 'Regularly', fromCompletion: 'FromCompletion' }[
+        options.schedule ?? 'regularly'
+      ];
+      const anchorEnum = { deferDate: 'DeferDate', dueDate: 'DueDate', plannedDate: 'PlannedDate' }[
+        options.anchor ?? 'dueDate'
+      ];
+      if (!scheduleEnum) {
+        throw new OmniFocusCliError(
+          `Invalid schedule: "${options.schedule}" (expected regularly or fromCompletion)`,
+          400
+        );
+      }
+      if (!anchorEnum) {
+        throw new OmniFocusCliError(
+          `Invalid anchor: "${options.anchor}" (expected dueDate, deferDate, or plannedDate)`,
+          400
+        );
+      }
+      // The second (method) argument is the deprecated pre-4.7 form and must
+      // be null when scheduleType/anchorDateKey are given.
+      action = `task.repetitionRule = new Task.RepetitionRule("${this.escapeString(options.rule)}", null, Task.RepetitionScheduleType.${scheduleEnum}, Task.AnchorDateKey.${anchorEnum}, ${options.catchUp === true});`;
+    }
+
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const task = findTask("${this.escapeString(idOrName)}");
+        ${action}
+        return JSON.stringify(serializeTask(task));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Emit script code resolving a MoveTaskOptions destination to a `position`
+   * usable by moveTasks/duplicateTasks. Exactly one destination is allowed:
+   * project | parentTask | inbox (each with an optional beginning/end
+   * position, default end), or a before/after sibling position alone (the
+   * sibling implies the container).
+   */
+  private taskPositionCode(options: MoveTaskOptions): string {
+    const position = options.position;
+    const relative = typeof position === 'object' && position !== null ? position : undefined;
+    const destinations = [
+      options.project !== undefined,
+      options.parentTask !== undefined,
+      options.inbox === true,
+      relative !== undefined,
+    ].filter(Boolean).length;
+    if (destinations !== 1) {
+      throw new OmniFocusCliError(
+        'Specify exactly one destination: project, parentTask, inbox, or a before/after position',
+        400
+      );
+    }
+    if (relative) {
+      if ('before' in relative) {
+        return `const position = findTask("${this.escapeString(relative.before)}").before;`;
+      }
+      return `const position = findTask("${this.escapeString(relative.after)}").after;`;
+    }
+    // Container destinations: beginning or ending (the API's name for "end").
+    const edge = position === 'beginning' ? 'beginning' : 'ending';
+    if (options.project !== undefined) {
+      return `const position = findProject("${this.escapeString(options.project)}").${edge};`;
+    }
+    if (options.parentTask !== undefined) {
+      return `const position = findTask("${this.escapeString(options.parentTask)}").${edge};`;
+    }
+    return `const position = inbox.${edge};`;
+  }
+
+  /**
+   * Move a task to a project, under a parent task, to the inbox, or to a
+   * position relative to a sibling. Returns the task reserialized in place.
+   */
+  async moveTask(idOrName: string, options: MoveTaskOptions): Promise<Task> {
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const task = findTask("${this.escapeString(idOrName)}");
+        ${this.taskPositionCode(options)}
+        moveTasks([task], position);
+        return JSON.stringify(serializeTask(task));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Duplicate a task (children come along) to the same destinations moveTask
+   * accepts; with no destination the copy lands right after the original.
+   * Returns the new task.
+   */
+  async duplicateTask(idOrName: string, options: MoveTaskOptions = {}): Promise<Task> {
+    const hasDestination =
+      options.project !== undefined ||
+      options.parentTask !== undefined ||
+      options.inbox === true ||
+      options.position !== undefined;
+    const positionCode = hasDestination
+      ? this.taskPositionCode(options)
+      : 'const position = task.after;';
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const task = findTask("${this.escapeString(idOrName)}");
+        ${positionCode}
+        const newTasks = duplicateTasks([task], position);
+        if (!newTasks || newTasks.length === 0) {
+          throw new Error("Duplicate failed: OmniFocus returned no new task");
+        }
+        return JSON.stringify(serializeTask(newTasks[0]));
+      })();
+    `;
+
+    const output = await this.executeJXA(this.wrapOmniScript(omniScript));
+    return JSON.parse(output);
+  }
+
+  /**
+   * Create tasks from OmniFocus transport text (TaskPaper-style shorthand)
+   * via Task.byParsingTransportText. Created tasks land in the inbox unless
+   * a project is given, in which case they are moved there in the same
+   * script. Returns the created tasks.
+   */
+  async parseTasks(text: string, options: ParseTasksOptions = {}): Promise<Task[]> {
+    const moveCode = options.project
+      ? `const targetProject = findProject("${this.escapeString(options.project)}");
+        moveTasks(created, targetProject);`
+      : '';
+    const omniScript = `
+      ${this.OMNI_HELPERS}
+      (() => {
+        const created = Task.byParsingTransportText("${this.escapeString(text)}", null);
+        ${moveCode}
+        return JSON.stringify(created.map(t => serializeTask(t)));
       })();
     `;
 

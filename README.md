@@ -35,6 +35,7 @@ of task list --completed            # Include completed
 
 of task create "Name" [options]
   --project <name>                  # Assign to project
+  --parent <name|id>                # Create as a subtask of this task
   --tag <tags...>                   # Add tags
   --due <YYYY-MM-DD>                # Set due date
   --defer <YYYY-MM-DD>              # Set defer date
@@ -47,9 +48,34 @@ of task update <name|id> [options]
   --complete                        # Mark completed
   --flag / --unflag                 # Toggle flag
   --name <new-name>                 # Rename
+  --parent <name|id>                # Reparent under another task
+  --sequential / --no-sequential    # Children completed in order (or not)
+  --completed-by-children           # Auto-complete when last child completes
   --project/--tag/--due/--defer     # Same as create
 
 of task view <name|id>              # View details
+of task view <name|id> --children   # Include one level of subtasks
+
+of task repeat <name|id> --rule "FREQ=WEEKLY;BYDAY=MO"   # Repeat weekly on Mondays
+  --schedule <regularly|fromCompletion>                  # Default regularly
+  --anchor <dueDate|deferDate|plannedDate>               # Default dueDate
+  --catch-up                                             # Skip missed occurrences
+of task repeat <name|id> --clear                         # Remove the repeat
+
+of task move <name|id> --project "Work"        # Move into a project
+of task move <name|id> --parent <name|id>      # Make it a subtask
+of task move <name|id> --inbox                 # Back to the inbox
+of task move <name|id> --before <sibling>      # Reorder relative to a sibling
+of task move <name|id> --project "Work" --position beginning
+
+of task duplicate <name|id>                    # Copy (lands after the original)
+of task duplicate <name|id> --project "Work"   # Copy into a project
+
+of task parse "Fix gutters! ::House #friday $2h @errands //note"
+  # Transport text: ! flag, ::project, #defer #due (one # = due),
+  # $duration, @tag, //note, -- starts another task
+of task parse "A -- B -- C" --project "Work"   # Bulk create into a project
+
 of task delete <name|id>            # Delete task
 ```
 
@@ -170,7 +196,7 @@ The first connection triggers the same macOS Automation permission prompt as the
 
 | Domain | Tools |
 | --- | --- |
-| Tasks | `list_tasks`, `get_task`, `create_task`, `update_task`, `update_tasks`, `drop_task`, `delete_task`, `search_tasks`, `convert_task_to_project`, `get_task_stats` |
+| Tasks | `list_tasks`, `get_task`, `create_task`, `update_task`, `update_tasks`, `drop_task`, `delete_task`, `search_tasks`, `convert_task_to_project`, `set_task_repeat`, `move_task`, `duplicate_task`, `parse_tasks`, `get_task_stats` |
 | Inbox | `list_inbox`, `get_inbox_count`, `cleanup_inbox` |
 | Projects | `list_projects`, `get_project`, `create_project`, `update_project`, `complete_project`, `delete_project`, `search_projects`, `list_projects_due_for_review`, `mark_project_reviewed`, `get_project_stats` |
 | Tags | `list_tags`, `get_tag`, `create_tag`, `update_tag`, `delete_tag`, `search_tags`, `get_tag_stats` |
