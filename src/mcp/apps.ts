@@ -1,10 +1,15 @@
-import {
-  RESOURCE_MIME_TYPE,
-  registerAppResource,
-  registerAppTool,
-} from '@modelcontextprotocol/ext-apps/server';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  CallToolResult,
+  Icon,
+  McpServer,
+  ReadResourceCallback,
+  RegisteredResource,
+  RegisteredTool,
+  ResourceMetadata,
+  ServerContext,
+  StandardSchemaWithJSON,
+  ToolAnnotations,
+} from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { OmniFocusCliError } from '../lib/errors.js';
 import type { OmniFocus } from '../lib/omnifocus.js';
@@ -19,6 +24,70 @@ export const STATS_DASHBOARD_URI = 'ui://omnifocus/stats-dashboard.html';
 
 /** URI linking the triage_tasks tool to its UI template. */
 export const TRIAGE_URI = 'ui://omnifocus/triage.html';
+
+/**
+ * The following three helpers (RESOURCE_MIME_TYPE, registerAppResource,
+ * registerAppTool) reimplement `@modelcontextprotocol/ext-apps`'s server
+ * helpers locally. That package has no v2-compatible release — it imported
+ * from v1-only internal subpaths of `@modelcontextprotocol/sdk`, which has
+ * itself been replaced by `@modelcontextprotocol/server` — and has no
+ * successor package, so it was uninstalled. All three were thin wrappers
+ * around the SDK's own McpServer methods; hand-rolling them here against v2
+ * primitives keeps this file self-sufficient without reintroducing a
+ * dependency on an abandoned package.
+ */
+
+/** MIME type for MCP Apps HTML resources (io.modelcontextprotocol/ui, spec 2026-01-26). */
+export const RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+
+/** Forwards to McpServer#registerResource for a static (string-URI) resource. */
+function registerAppResource(
+  server: McpServer,
+  name: string,
+  uri: string,
+  config: ResourceMetadata,
+  readCallback: ReadResourceCallback
+): RegisteredResource {
+  return server.registerResource(name, uri, config, readCallback);
+}
+
+/**
+ * Forwards to McpServer#registerTool, additionally mirroring the UI resource
+ * URI from `_meta.ui.resourceUri` into the flat legacy `_meta['ui/resourceUri']`
+ * key so hosts that predate the nested `ui` meta shape can still find it.
+ */
+function registerAppTool<Args extends Record<string, z.ZodType>>(
+  server: McpServer,
+  name: string,
+  config: {
+    title?: string;
+    description?: string;
+    inputSchema?: Args;
+    outputSchema?: Record<string, z.ZodType> | StandardSchemaWithJSON;
+    annotations?: ToolAnnotations;
+    icons?: Icon[];
+    _meta: { ui: { resourceUri: string } };
+  },
+  cb: (args: z.infer<z.ZodObject<Args>>, ctx: ServerContext) => Promise<CallToolResult>
+): RegisteredTool {
+  const { _meta, ...rest } = config;
+  // registerTool's raw-shape overload types its callback via a conditional
+  // type keyed to a concrete Args, which TS can't resolve while Args is
+  // still this wrapper's own generic parameter. The cast is safe: `cb`'s
+  // args/return types are structurally identical to what that overload
+  // expects once Args is instantiated at each call site below.
+  return server.registerTool(
+    name,
+    {
+      ...rest,
+      _meta: {
+        ..._meta,
+        'ui/resourceUri': _meta.ui.resourceUri,
+      },
+    },
+    cb as never
+  );
+}
 
 /**
  * A discoverable app tool: name + description only. App tools are registered
@@ -59,7 +128,7 @@ export const APP_TOOL_DESCRIPTORS: readonly AppToolDescriptor[] = [
  * performs mutations by calling the existing update_task tool back through
  * the host via app -> host "tools/call" requests.
  */
-export function registerApps(server: McpServer, of: OmniFocus): void {
+export function registerApps(server: McpServer, of: OmniFocus): RegisteredTool[] {
   registerAppResource(
     server,
     'Stats dashboard',
@@ -80,17 +149,17 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
     })
   );
 
-  registerAppTool(
+  const statsDashboardTool = registerAppTool(
     server,
     'get_stats_dashboard',
     {
       title: 'Stats dashboard',
       description: GET_STATS_DASHBOARD_DESCRIPTION,
       inputSchema: {},
-      // Raw shape rather than the ZodObject: registerAppTool's OutputArgs
-      // accepts ZodRawShapeCompat | StandardSchemaWithJSON, and zod 3 only
-      // satisfies the latter's validate half, not its jsonSchema half.
-      outputSchema: StatsDashboardSchema.shape,
+      // Full ZodObject rather than its raw shape: zod v4 objects satisfy
+      // StandardSchemaWithJSON directly (both the validate and jsonSchema
+      // halves), so registerAppTool's OutputArgs takes it as-is.
+      outputSchema: StatsDashboardSchema,
       // Mirrors the READ preset in server.ts (title duplicated into
       // annotations for clients that predate the top-level title field).
       annotations: {
@@ -140,7 +209,7 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
     })
   );
 
-  registerAppTool(
+  const triageTasksTool = registerAppTool(
     server,
     'triage_tasks',
     {
@@ -159,8 +228,8 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
           .optional()
           .describe('Maximum number of tasks to return (default 50)'),
       },
-      // Raw shape for the same ZodRawShapeCompat reason as get_stats_dashboard.
-      outputSchema: TriageResultSchema.shape,
+      // Full ZodObject, for the same reason as get_stats_dashboard above.
+      outputSchema: TriageResultSchema,
       // Mirrors the READ preset in server.ts: this tool only reads; the
       // widget's mutations go through the existing update_task tool.
       annotations: {
@@ -206,4 +275,6 @@ export function registerApps(server: McpServer, of: OmniFocus): void {
       }
     }
   );
+
+  return [statsDashboardTool, triageTasksTool];
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import {
   buildTools,
   SERVER_INSTRUCTIONS,
@@ -8,6 +8,43 @@ import {
   type ToolSpec,
 } from '../server.js';
 import type { OmniFocus } from '../../lib/omnifocus.js';
+
+/**
+ * Builds a minimally-valid ServerContext (aliased as ToolCallExtra) for tests
+ * that need to control `signal`, `_meta`, or observe `notify()` calls. v2's
+ * ServerContext requires several fields real transports always supply
+ * (id, method, requestState, send, log, elicitInput) that these unit tests
+ * never exercise — filled with inert defaults so only the fields under test
+ * need overriding.
+ */
+function makeExtra(
+  overrides: {
+    signal?: AbortSignal;
+    meta?: Record<string, unknown>;
+    notify?: (notification: unknown) => Promise<void>;
+  } = {}
+): ToolCallExtra {
+  return {
+    mcpReq: {
+      id: 1,
+      method: 'tools/call',
+      _meta: overrides.meta as ToolCallExtra['mcpReq']['_meta'],
+      signal: overrides.signal ?? new AbortController().signal,
+      notify: (overrides.notify ?? (async () => {})) as ToolCallExtra['mcpReq']['notify'],
+      send: (async () => {
+        throw new Error('send() not implemented in test fixture');
+      }) as ToolCallExtra['mcpReq']['send'],
+      requestState: (() => undefined) as ToolCallExtra['mcpReq']['requestState'],
+      log: async () => {},
+      elicitInput: async () => {
+        throw new Error('elicitInput() not implemented in test fixture');
+      },
+      requestSampling: async () => {
+        throw new Error('requestSampling() not implemented in test fixture');
+      },
+    },
+  };
+}
 
 /**
  * These tests exercise the MCP tool catalogue without OmniFocus or osascript.
@@ -611,14 +648,17 @@ describe('handler failures become isError tool results (SEP-1303)', () => {
     expect(result.isError).toBeUndefined();
   });
 
-  it('re-throws McpError so the SDK protocol path (e.g. elicitation) still works', async () => {
-    // McpError is the SDK's protocol-level signal; the SDK dispatcher
-    // special-cases it (createToolError skips it for UrlElicitationRequired).
-    // safeHandler must not swallow it into an isError result.
-    const { of } = makeMockOf({ getTask: new McpError(ErrorCode.InvalidRequest, 'protocol boom') });
+  it('re-throws ProtocolError so the SDK protocol path (e.g. elicitation) still works', async () => {
+    // ProtocolError is the SDK's protocol-level signal (v2's replacement for
+    // v1's McpError); the SDK dispatcher special-cases it (createToolError
+    // skips it for UrlElicitationRequired). safeHandler must not swallow it
+    // into an isError result.
+    const { of } = makeMockOf({
+      getTask: new ProtocolError(ProtocolErrorCode.InvalidRequest, 'protocol boom'),
+    });
     const tools = buildTools(of);
     await expect(tool(tools, 'get_task').handler({ idOrName: 'x' })).rejects.toBeInstanceOf(
-      McpError
+      ProtocolError
     );
   });
 });
@@ -630,7 +670,7 @@ describe('get_perspective_tasks cancellation and progress', () => {
     const controller = new AbortController();
     await tool(tools, 'get_perspective_tasks').handler(
       { name: 'Today' },
-      { signal: controller.signal }
+      makeExtra({ signal: controller.signal })
     );
     const call = calls.find((c) => c.method === 'getPerspectiveTasks');
     expect(call?.args).toEqual(['Today', { signal: controller.signal }]);
@@ -640,12 +680,12 @@ describe('get_perspective_tasks cancellation and progress', () => {
     const { of } = makeMockOf({ getPerspectiveTasks: [] });
     const tools = buildTools(of);
     const notifications: unknown[] = [];
-    const extra: ToolCallExtra = {
-      _meta: { progressToken: 42 },
-      sendNotification: async (n) => {
+    const extra = makeExtra({
+      meta: { progressToken: 42 },
+      notify: async (n) => {
         notifications.push(n);
       },
-    };
+    });
     await tool(tools, 'get_perspective_tasks').handler({ name: 'Today' }, extra);
     expect(notifications.length).toBeGreaterThanOrEqual(1);
     expect(notifications[0]).toMatchObject({
@@ -658,11 +698,11 @@ describe('get_perspective_tasks cancellation and progress', () => {
     const { of } = makeMockOf({ getPerspectiveTasks: [] });
     const tools = buildTools(of);
     const notifications: unknown[] = [];
-    const extra: ToolCallExtra = {
-      sendNotification: async (n) => {
+    const extra = makeExtra({
+      notify: async (n) => {
         notifications.push(n);
       },
-    };
+    });
     await tool(tools, 'get_perspective_tasks').handler({ name: 'Today' }, extra);
     expect(notifications).toHaveLength(0);
   });
@@ -676,12 +716,12 @@ describe('startProgressHeartbeat', () => {
 
   it('keeps ticking on an interval until stopped', async () => {
     const notifications: unknown[] = [];
-    const extra: ToolCallExtra = {
-      _meta: { progressToken: 'tok' },
-      sendNotification: async (n) => {
+    const extra = makeExtra({
+      meta: { progressToken: 'tok' },
+      notify: async (n) => {
         notifications.push(n);
       },
-    };
+    });
     const stop = startProgressHeartbeat(extra, 'working', 20);
     await new Promise((r) => setTimeout(r, 70));
     stop();

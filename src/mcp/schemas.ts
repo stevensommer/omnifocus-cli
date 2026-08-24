@@ -10,7 +10,7 @@ import { z } from 'zod';
  * runtime, so a schema stricter than the serializer breaks the tool — when
  * the serializer's output is loosely typed, the schema is loosened to match
  * (e.g. reviewInterval.unit is passed through raw, so it stays a string).
- * All object roots use .passthrough() so a serializer gaining a field never
+ * All object roots use .loose() so a serializer gaining a field never
  * fails validation; only *missing* or mistyped fields fail.
  *
  * Convention for array results: CallToolResult.structuredContent must be a
@@ -30,7 +30,7 @@ export const RepetitionSchema = z
     anchorDateKey: z.enum(['deferDate', 'dueDate', 'plannedDate']),
     catchUpAutomatically: z.boolean(),
   })
-  .passthrough();
+  .loose();
 
 const taskShape = {
   id: z.string(),
@@ -76,8 +76,8 @@ const taskShape = {
  * themselves without children) is only present via get_task includeChildren.
  */
 export const TaskSchema = z
-  .object({ ...taskShape, children: z.array(z.object(taskShape).passthrough()).optional() })
-  .passthrough();
+  .object({ ...taskShape, children: z.array(z.object(taskShape).loose()).optional() })
+  .loose();
 
 /** Mirrors serializeProject's reviewInterval (Project.ReviewInterval). */
 export const ReviewIntervalSchema = z
@@ -86,7 +86,7 @@ export const ReviewIntervalSchema = z
     // The serializer passes Omni Automation's unit string through raw.
     unit: z.string(),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors serializeProject. */
 export const ProjectSchema = z
@@ -105,7 +105,7 @@ export const ProjectSchema = z
     estimatedMinutes: z.number().nullable(),
     completedByChildren: z.boolean(),
     containsSingletonActions: z.boolean(),
-    nextTask: z.object({ id: z.string(), name: z.string() }).passthrough().nullable(),
+    nextTask: z.object({ id: z.string(), name: z.string() }).loose().nullable(),
     taskCount: z.number(),
     remainingCount: z.number(),
     tags: z.array(z.string()),
@@ -115,7 +115,7 @@ export const ProjectSchema = z
     repetition: RepetitionSchema.nullable(),
     url: z.string(),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors serializeTag. */
 export const TagSchema = z
@@ -140,16 +140,17 @@ export const TagSchema = z
     allowsNextAction: z.boolean(),
     url: z.string(),
   })
-  .passthrough();
+  .loose();
 
 /**
  * Mirrors serializeFolder. Folders nest arbitrarily, so `children` recurses
- * via z.lazy on the array items; the SDK's zod-to-json-schema serialises the
- * recursion as internal $ref pointers (verified against
- * @modelcontextprotocol/sdk 1.25.x). The root must stay a plain ZodObject —
- * the SDK's normalizeObjectSchema silently drops a top-level ZodLazy.
+ * via z.lazy on the array items. Zod v4's native JSON Schema converter
+ * (z.toJSONSchema) handles this self-recursion cleanly under target:
+ * 'draft-2020-12', emitting a `{ "$ref": "#" }` pointer back to the schema
+ * root for `children` items (verified against zod 4.4.3) — no third-party
+ * converter involved.
  */
-export const FolderSchema: z.ZodType<Record<string, unknown>> = z
+export const FolderSchema: z.ZodType = z
   .object({
     id: z.string(),
     name: z.string(),
@@ -162,13 +163,13 @@ export const FolderSchema: z.ZodType<Record<string, unknown>> = z
     children: z.array(z.lazy(() => FolderSchema)),
     url: z.string(),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors the listPerspectives script output. */
-export const PerspectiveSchema = z.object({ id: z.string(), name: z.string() }).passthrough();
+export const PerspectiveSchema = z.object({ id: z.string(), name: z.string() }).loose();
 
 /** {name, taskCount} rows emitted by computeTopItems in the stats scripts. */
-const nameTaskCount = z.object({ name: z.string(), taskCount: z.number() }).passthrough();
+const nameTaskCount = z.object({ name: z.string(), taskCount: z.number() }).loose();
 
 /** Mirrors the getTaskStats script output (TaskStats). */
 export const TaskStatsSchema = z
@@ -184,7 +185,7 @@ export const TaskStatsSchema = z
     tasksByProject: z.array(nameTaskCount),
     tasksByTag: z.array(nameTaskCount),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors the getProjectStats script output (ProjectStats). */
 export const ProjectStatsSchema = z
@@ -201,10 +202,10 @@ export const ProjectStatsSchema = z
     avgCompletionRate: z.number(),
     projectsWithMostTasks: z.array(nameTaskCount),
     projectsWithMostRemaining: z.array(
-      z.object({ name: z.string(), remainingCount: z.number() }).passthrough()
+      z.object({ name: z.string(), remainingCount: z.number() }).loose()
     ),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors the getTagStats script output (TagStats). */
 export const TagStatsSchema = z
@@ -216,9 +217,9 @@ export const TagStatsSchema = z
     avgTasksPerTag: z.number(),
     mostUsedTags: z.array(nameTaskCount),
     leastUsedTags: z.array(nameTaskCount),
-    staleTags: z.array(z.object({ name: z.string(), daysSinceActivity: z.number() }).passthrough()),
+    staleTags: z.array(z.object({ name: z.string(), daysSinceActivity: z.number() }).loose()),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors the per-id rows returned by updateTasks (BatchUpdateResult). */
 export const BatchUpdateResultSchema = z
@@ -228,23 +229,23 @@ export const BatchUpdateResultSchema = z
     task: TaskSchema.optional(),
     error: z.string().optional(),
   })
-  .passthrough();
+  .loose();
 
 /** Mirrors the cleanupInbox script output (CleanupInboxResult). */
 export const CleanupInboxResultSchema = z
   .object({ inboxBefore: z.number(), assigned: z.number(), inboxAfter: z.number() })
-  .passthrough();
+  .loose();
 
 /** {deleted: true} marker returned by the delete_* tools. */
-export const DeletedSchema = z.object({ deleted: z.boolean() }).passthrough();
+export const DeletedSchema = z.object({ deleted: z.boolean() }).loose();
 
 /** {count} wrapper returned by get_inbox_count. */
-export const CountSchema = z.object({ count: z.number() }).passthrough();
+export const CountSchema = z.object({ count: z.number() }).loose();
 
 /** undo / redo / sync_now status objects. */
-export const UndoneSchema = z.object({ undone: z.boolean() }).passthrough();
-export const RedoneSchema = z.object({ redone: z.boolean() }).passthrough();
-export const SavedSchema = z.object({ saved: z.boolean() }).passthrough();
+export const UndoneSchema = z.object({ undone: z.boolean() }).loose();
+export const RedoneSchema = z.object({ redone: z.boolean() }).loose();
+export const SavedSchema = z.object({ saved: z.boolean() }).loose();
 
 /**
  * search_tools result: a match list on success, or {error} for an invalid
@@ -252,25 +253,23 @@ export const SavedSchema = z.object({ saved: z.boolean() }).passthrough();
  */
 export const SearchToolsResultSchema = z
   .object({
-    tools: z
-      .array(z.object({ name: z.string(), description: z.string() }).passthrough())
-      .optional(),
+    tools: z.array(z.object({ name: z.string(), description: z.string() }).loose()).optional(),
     error: z.string().optional(),
   })
-  .passthrough();
+  .loose();
 
 /**
  * Wrap an item schema as the { items, count } object that list tools put in
  * structuredContent (the MCP spec requires an object root, not an array).
  */
-export function listOf(item: z.ZodTypeAny) {
-  return z.object({ items: z.array(item), count: z.number().int() }).passthrough();
+export function listOf(item: z.ZodType) {
+  return z.object({ items: z.array(item), count: z.number().int() }).loose();
 }
 
 /** get_stats_dashboard combined payload. */
 export const StatsDashboardSchema = z
   .object({ tasks: TaskStatsSchema, projects: ProjectStatsSchema, tags: TagStatsSchema })
-  .passthrough();
+  .loose();
 
 /** triage_tasks payload. */
 export const TriageResultSchema = z
@@ -280,4 +279,4 @@ export const TriageResultSchema = z
     shown: z.number(),
     tasks: z.array(TaskSchema),
   })
-  .passthrough();
+  .loose();
