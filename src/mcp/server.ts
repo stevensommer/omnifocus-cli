@@ -57,8 +57,8 @@ export interface ToolSpec {
   schema: ZodRawShape;
   /**
    * Zod object schema for the tool's structuredContent (MCP outputSchema).
-   * A full ZodObject (not a raw shape) so `.passthrough()` survives into the
-   * advertised JSON schema as `additionalProperties: true` — the serializers
+   * A full ZodObject (not a raw shape) so `.loose()` survives into the
+   * advertised JSON schema as `additionalProperties: {}` — the serializers
    * may gain fields without breaking strict clients. The SDK validates every
    * non-error structuredContent against this at runtime.
    */
@@ -198,10 +198,14 @@ function def<S extends ZodRawShape>(
   // Operational failures become isError tool results (per SEP-1303) carrying
   // the same structured error JSON as the CLI, so the calling model can read
   // the failure and self-correct. ProtocolError is re-thrown untouched: it is
-  // the SDK's own JSON-RPC-level signal (e.g. elicitation-required) and the
-  // SDK's own dispatcher special-cases it — wrapping it here would break that
-  // path. isError results deliberately omit structuredContent: the SDK only
-  // skips outputSchema validation for error results.
+  // the SDK's own JSON-RPC-level signal, and wrapping it here would misreport
+  // a protocol-level failure as an ordinary tool error. (Elicitation is NOT
+  // an example of this: on the 2026-07-28 protocol a handler requests it by
+  // returning `inputRequired(...)`, not by throwing — a thrown
+  // UrlElicitationRequiredError fails loudly on a modern-era request rather
+  // than being converted into a working elicitation round-trip.) isError
+  // results deliberately omit structuredContent: the SDK only skips
+  // outputSchema validation for error results.
   const safeHandler: ToolSpec['handler'] = async (args, extra) => {
     try {
       return await handler(args as z.infer<z.ZodObject<S>>, extra);

@@ -648,11 +648,11 @@ describe('handler failures become isError tool results (SEP-1303)', () => {
     expect(result.isError).toBeUndefined();
   });
 
-  it('re-throws ProtocolError so the SDK protocol path (e.g. elicitation) still works', async () => {
+  it('re-throws ProtocolError instead of wrapping it into an isError result', async () => {
     // ProtocolError is the SDK's protocol-level signal (v2's replacement for
-    // v1's McpError); the SDK dispatcher special-cases it (createToolError
-    // skips it for UrlElicitationRequired). safeHandler must not swallow it
-    // into an isError result.
+    // v1's McpError). safeHandler must not swallow it into an isError result,
+    // or a genuine JSON-RPC-level failure would be misreported as an
+    // ordinary tool error instead of reaching the SDK's own dispatcher.
     const { of } = makeMockOf({
       getTask: new ProtocolError(ProtocolErrorCode.InvalidRequest, 'protocol boom'),
     });
