@@ -1,5 +1,4 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { McpServer, CallToolResult } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 import type { OmniFocus } from '../../lib/omnifocus.js';
 import { APP_TOOL_DESCRIPTORS, registerApps, STATS_DASHBOARD_URI, TRIAGE_URI } from '../apps.js';

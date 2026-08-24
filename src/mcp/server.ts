@@ -1,10 +1,14 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { McpError } from '@modelcontextprotocol/sdk/types.js';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer, ProtocolError } from '@modelcontextprotocol/server';
+import type {
+  CallToolResult,
+  RegisteredTool,
+  ServerContext,
+  ToolAnnotations,
+} from '@modelcontextprotocol/server';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { z, type ZodRawShape, type ZodTypeAny } from 'zod';
+import { z, type ZodRawShape } from 'zod';
 import { classifyError, OmniFocusCliError } from '../lib/errors.js';
 import { OmniFocus } from '../lib/omnifocus.js';
 import { APP_TOOL_DESCRIPTORS, registerApps } from './apps.js';
@@ -35,23 +39,15 @@ import {
  * from the registered catalogue.
  */
 /**
- * Structural subset of the SDK's RequestHandlerExtra that handlers use:
- * enough for cancellation and progress without importing the SDK's generic
- * types into every test.
+ * The v2 SDK's own context type, provided as the callback's 2nd argument for
+ * every registered tool. Re-exported under this name for continuity with
+ * existing imports (e.g. `src/mcp/__tests__/server.test.ts`) — it now points
+ * straight at the SDK's `ServerContext` rather than a hand-maintained
+ * structural subset, since `ServerContext` already covers everything the
+ * handlers below need (`ctx.mcpReq.signal`, `ctx.mcpReq._meta`,
+ * `ctx.mcpReq.notify`).
  */
-export interface ToolCallExtra {
-  signal?: AbortSignal;
-  _meta?: { progressToken?: string | number };
-  sendNotification?: (notification: {
-    method: 'notifications/progress';
-    params: {
-      progressToken: string | number;
-      progress: number;
-      total?: number;
-      message?: string;
-    };
-  }) => Promise<void>;
-}
+export type ToolCallExtra = ServerContext;
 
 export interface ToolSpec {
   name: string;
@@ -61,12 +57,12 @@ export interface ToolSpec {
   schema: ZodRawShape;
   /**
    * Zod object schema for the tool's structuredContent (MCP outputSchema).
-   * A full ZodObject (not a raw shape) so `.passthrough()` survives into the
-   * advertised JSON schema as `additionalProperties: true` — the serializers
+   * A full ZodObject (not a raw shape) so `.loose()` survives into the
+   * advertised JSON schema as `additionalProperties: {}` — the serializers
    * may gain fields without breaking strict clients. The SDK validates every
    * non-error structuredContent against this at runtime.
    */
-  outputSchema: ZodTypeAny;
+  outputSchema: z.ZodType;
   handler: (
     args: Record<string, unknown>,
     extra?: ToolCallExtra
@@ -163,15 +159,15 @@ export function startProgressHeartbeat(
   message: string,
   intervalMs = 5000
 ): () => void {
-  const progressToken = extra?._meta?.progressToken;
-  const send = extra?.sendNotification;
-  if (progressToken === undefined || !send) return () => {};
+  const progressToken = extra?.mcpReq?._meta?.progressToken;
+  const notify = extra?.mcpReq?.notify;
+  if (progressToken === undefined || !notify) return () => {};
 
   let progress = 0;
   const tick = () => {
     progress += 1;
     // Progress failures must never break the tool call itself.
-    send({
+    notify({
       method: 'notifications/progress',
       params: { progressToken, progress, message },
     }).catch(() => {});
@@ -193,7 +189,7 @@ function def<S extends ZodRawShape>(
   description: string,
   annotations: ToolAnnotations,
   schema: S,
-  outputSchema: ZodTypeAny,
+  outputSchema: z.ZodType,
   handler: (
     args: z.infer<z.ZodObject<S>>,
     extra?: ToolCallExtra
@@ -201,16 +197,20 @@ function def<S extends ZodRawShape>(
 ): ToolSpec {
   // Operational failures become isError tool results (per SEP-1303) carrying
   // the same structured error JSON as the CLI, so the calling model can read
-  // the failure and self-correct. McpError is re-thrown untouched: it is the
-  // SDK's protocol-level signal (e.g. elicitation-required) and the SDK's own
-  // dispatcher special-cases it — wrapping it here would break that path.
-  // isError results deliberately omit structuredContent: the SDK only skips
+  // the failure and self-correct. ProtocolError is re-thrown untouched: it is
+  // the SDK's own JSON-RPC-level signal, and wrapping it here would misreport
+  // a protocol-level failure as an ordinary tool error. (Elicitation is NOT
+  // an example of this: on the 2026-07-28 protocol a handler requests it by
+  // returning `inputRequired(...)`, not by throwing — a thrown
+  // UrlElicitationRequiredError fails loudly on a modern-era request rather
+  // than being converted into a working elicitation round-trip.) isError
+  // results deliberately omit structuredContent: the SDK only skips
   // outputSchema validation for error results.
   const safeHandler: ToolSpec['handler'] = async (args, extra) => {
     try {
       return await handler(args as z.infer<z.ZodObject<S>>, extra);
     } catch (error) {
-      if (error instanceof McpError) throw error;
+      if (error instanceof ProtocolError) throw error;
       return structuredError(error);
     }
   };
@@ -735,7 +735,9 @@ export function buildTools(of: OmniFocus): ToolSpec[] {
           `Reading perspective "${name}" in OmniFocus`
         );
         try {
-          return structuredResponse(await of.getPerspectiveTasks(name, { signal: extra?.signal }));
+          return structuredResponse(
+            await of.getPerspectiveTasks(name, { signal: extra?.mcpReq?.signal })
+          );
         } finally {
           stopHeartbeat();
         }
@@ -1001,7 +1003,20 @@ export const SERVER_INSTRUCTIONS = `CLI-backed MCP server for OmniFocus on macOS
 - undo/redo revert whole tool calls (OmniFocus groups each script into one undo step) — a safety valve after a bad batch update.
 - Use search_tools (case-insensitive regex over tool names/descriptions) to discover capabilities.`;
 
-export async function runMcpServer() {
+/**
+ * Construct the McpServer and register every tool (the plain catalogue from
+ * `buildTools()` plus the MCP App tools from `registerApps()`), without
+ * attaching a transport. Split out from `runMcpServer()` so tests can build
+ * and inspect the registered catalogue — in particular each tool's
+ * `outputSchemaJson`, the JSON Schema actually advertised over the wire — in
+ * process, without a child process, a built `dist/`, or a transport.
+ *
+ * `of` defaults to a real `OmniFocus` instance; tests can inject a mock.
+ */
+export function createMcpServer(of: OmniFocus = new OmniFocus()): {
+  server: McpServer;
+  registered: RegisteredTool[];
+} {
   const server = new McpServer(
     {
       name: 'omnifocus',
@@ -1013,25 +1028,37 @@ export async function runMcpServer() {
     { instructions: SERVER_INSTRUCTIONS }
   );
 
-  const of = new OmniFocus();
+  const registered: RegisteredTool[] = [];
   for (const tool of buildTools(of)) {
-    server.registerTool(
-      tool.name,
-      {
-        title: tool.title,
-        description: tool.description,
-        inputSchema: tool.schema,
-        outputSchema: tool.outputSchema,
-        // Duplicate the title into annotations for clients that predate the
-        // top-level `title` field and fall back to `annotations.title`.
-        annotations: { title: tool.title, ...tool.annotations },
-      },
-      tool.handler
+    registered.push(
+      server.registerTool(
+        tool.name,
+        {
+          title: tool.title,
+          description: tool.description,
+          // z.object(...) here (rather than the bare raw shape) opts into
+          // registerTool's modern, non-deprecated overload. It's a separate
+          // value from `tool.schema` itself, so it doesn't disturb the
+          // per-tool z.infer<z.ZodObject<S>> argument inference `def()` still
+          // relies on internally (see ToolSpec.schema).
+          inputSchema: z.object(tool.schema),
+          outputSchema: tool.outputSchema,
+          // Duplicate the title into annotations for clients that predate the
+          // top-level `title` field and fall back to `annotations.title`.
+          annotations: { title: tool.title, ...tool.annotations },
+        },
+        tool.handler
+      )
     );
   }
 
-  registerApps(server, of);
+  registered.push(...registerApps(server, of));
 
+  return { server, registered };
+}
+
+export async function runMcpServer(): Promise<void> {
+  const { server } = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
